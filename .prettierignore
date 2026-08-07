@@ -1,0 +1,8 @@
+coverage/
+.agents/
+.tmp/
+node_modules/
+out/
+openspec/changes/codex-e2e-*/
+release/
+pnpm-lock.yaml
