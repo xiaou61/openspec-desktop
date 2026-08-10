@@ -4,6 +4,8 @@ import {
   retentionSettingsSchema,
   safeRelativePathSchema,
   scanOptionsSchema,
+  versionKeySchema,
+  versionModeSchema,
 } from './contracts';
 
 export const ipcChannelSchema = z.enum([
@@ -25,10 +27,12 @@ export const ipcChannelSchema = z.enum([
   'project:rescan',
   'history:list-revisions',
   'history:list-activity',
+  'history:list-version-summaries',
   'history:compare',
   'history:clear',
   'history:get-retention',
   'history:set-retention',
+  'project:refresh-version',
   'system:reveal-artifact',
   'system:reveal-user-data',
   'system:get-user-data-path',
@@ -55,6 +59,7 @@ export const registerProjectRequestSchema = z
     rootPath: z.string().min(1).max(4096),
     displayName: z.string().min(1).max(160).optional(),
     versionLabel: z.string().max(120).optional(),
+    versionMode: versionModeSchema.optional(),
     groupId: localIdSchema.nullable().optional(),
   })
   .strict();
@@ -65,6 +70,7 @@ export const updateProjectRequestSchema = z
     projectId: localIdSchema,
     displayName: z.string().min(1).max(160).optional(),
     versionLabel: z.string().max(120).optional(),
+    versionMode: versionModeSchema.optional(),
     groupId: localIdSchema.nullable().optional(),
     order: z.number().int().nonnegative().optional(),
     watcherEnabled: z.boolean().optional(),
@@ -128,12 +134,19 @@ export const historyListRequestSchema = z
     projectId: localIdSchema,
     relativePath: safeRelativePathSchema.optional(),
     changeId: localIdSchema.optional(),
+    versionKey: versionKeySchema.optional(),
     artifactType: z.enum(['config', 'proposal', 'spec', 'design', 'tasks', 'metadata']).optional(),
     cursor: z.string().max(256).optional(),
     limit: z.number().int().min(1).max(200).default(50),
   })
   .strict();
 export type HistoryListRequest = z.infer<typeof historyListRequestSchema>;
+
+export const versionSummaryListRequestSchema = projectIdRequestSchema;
+export type VersionSummaryListRequest = z.infer<typeof versionSummaryListRequestSchema>;
+
+export const refreshVersionRequestSchema = projectIdRequestSchema;
+export type RefreshVersionRequest = z.infer<typeof refreshVersionRequestSchema>;
 
 export const historyRevisionListRequestSchema = historyListRequestSchema
   .extend({

@@ -17,8 +17,10 @@ function controllerStub(): AppController {
     updateGroup: vi.fn(),
     removeGroup: vi.fn(),
     rescanProject: vi.fn(),
+    refreshVersion: vi.fn(),
     listRevisions: vi.fn(),
     listActivity: vi.fn(),
+    listVersionSummaries: vi.fn(),
     compareRevisions: vi.fn(),
     clearHistory: vi.fn(),
     getRetention: vi.fn(),
@@ -115,5 +117,28 @@ describe('IpcRouter', () => {
     ).rejects.toThrow();
     expect(controller.listCodexProjects).toHaveBeenCalledOnce();
     expect(controller.importCodexProjects).toHaveBeenCalledWith(request);
+  });
+
+  it('validates version refresh and history filters before dispatching', async () => {
+    const controller = controllerStub();
+    const router = createIpcRouter(controller);
+    await router.dispatch('project:refresh-version', { projectId: 'project-1' });
+    await router.dispatch('history:list-version-summaries', { projectId: 'project-1' });
+    await router.dispatch('history:list-activity', {
+      projectId: 'project-1',
+      versionKey: 'workspace',
+      limit: 20,
+    });
+    await expect(
+      router.dispatch('history:list-activity', {
+        projectId: 'project-1',
+        versionKey: 'v'.repeat(129),
+      }),
+    ).rejects.toThrow();
+    expect(controller.refreshVersion).toHaveBeenCalledWith({ projectId: 'project-1' });
+    expect(controller.listVersionSummaries).toHaveBeenCalledWith({ projectId: 'project-1' });
+    expect(controller.listActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ versionKey: 'workspace' }),
+    );
   });
 });

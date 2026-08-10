@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
-import type { CatalogState, ProjectGroup, ProjectRecord } from '@shared/contracts';
+import type {
+  CatalogState,
+  ProjectGroup,
+  ProjectRecord,
+  VersionMode,
+  VersionSource,
+} from '@shared/contracts';
 import { normalizeProjectRoot, validateOpenSpecProject } from '../domain/paths';
 import { createDefaultCatalogState } from './catalog-store';
 import type { CatalogStore } from './catalog-store';
@@ -15,11 +21,20 @@ export class CatalogValidationError extends Error {
 export interface CatalogServiceOptions {
   stopMonitoring?: (projectId: string) => Promise<void> | void;
   startMonitoring?: (project: ProjectRecord) => Promise<void> | void;
+  resolveVersion?: (project: ProjectRecord) => Promise<{
+    versionLabel: string;
+    versionMode: Extract<VersionMode, 'automatic'>;
+    versionSource: VersionSource;
+    versionResolvedAt: string;
+  }>;
 }
 
 export interface RegisterProjectOptions {
   displayName?: string;
   versionLabel?: string;
+  versionMode?: VersionMode;
+  versionSource?: VersionSource;
+  versionResolvedAt?: string;
   groupId?: string | null;
 }
 
@@ -43,6 +58,16 @@ export class CatalogService {
     this.initialized = true;
     let changed = false;
     for (const project of this.state.projects) {
+      if (project.versionMode === 'automatic' && this.options.resolveVersion) {
+        const beforeContext = this.versionContext(project);
+        const beforeResolvedAt = project.versionResolvedAt;
+        await this.prepareAutomaticVersion(project);
+        if (
+          !this.sameVersionContext(beforeContext, this.versionContext(project)) ||
+          beforeResolvedAt !== project.versionResolvedAt
+        )
+          changed = true;
+      }
       const validation = await validateOpenSpecProject(project.rootPath);
       const available = validation.valid;
       const nextState = available
@@ -121,11 +146,17 @@ export class CatalogService {
       }
       if (options.groupId !== undefined && options.groupId !== null) this.getGroup(options.groupId);
       const now = new Date().toISOString();
-      const project: ProjectRecord = {
+      const versionLabel = options.versionLabel?.trim() ?? '';
+      const versionMode = options.versionMode ?? (versionLabel ? 'manual' : 'automatic');
+      if (versionMode === 'manual' && !versionLabel)
+        throw new CatalogValidationError('手动版本标签不能为空');
+      let project: ProjectRecord = {
         id: randomUUID(),
         rootPath,
         displayName: options.displayName?.trim() || basename(rootPath),
-        versionLabel: options.versionLabel?.trim() ?? '',
+        versionLabel,
+        versionMode,
+        versionSource: versionMode === 'manual' ? 'manual' : (options.versionSource ?? 'workspace'),
         groupId: options.groupId ?? null,
         order: this.state.projects.length,
         watcherEnabled: true,
@@ -133,6 +164,9 @@ export class CatalogService {
         available: true,
         registeredAt: now,
       };
+      if (options.versionResolvedAt !== undefined)
+        project.versionResolvedAt = options.versionResolvedAt;
+      if (versionMode === 'automatic') project = await this.prepareAutomaticVersion(project);
       this.state.projects.push(project);
       await this.store.save(this.state);
       const result = structuredClone(project);
@@ -146,14 +180,31 @@ export class CatalogService {
     patch: RegisterProjectOptions & { order?: number; watcherEnabled?: boolean },
   ): Promise<ProjectRecord> {
     return this.enqueue(async () => {
-      const project = this.getProject(projectId);
+      let project = this.getProject(projectId);
       if (patch.groupId !== undefined && patch.groupId !== null) this.getGroup(patch.groupId);
       if (patch.displayName !== undefined) {
         const displayName = patch.displayName.trim();
         if (!displayName) throw new CatalogValidationError('项目名称不能为空');
         project.displayName = displayName;
       }
+      const versionRequested =
+        patch.versionLabel !== undefined ||
+        patch.versionMode !== undefined ||
+        patch.versionSource !== undefined ||
+        patch.versionResolvedAt !== undefined;
       if (patch.versionLabel !== undefined) project.versionLabel = patch.versionLabel.trim();
+      if (patch.versionLabel !== undefined && patch.versionMode === undefined)
+        project.versionMode = 'manual';
+      if (patch.versionMode !== undefined) project.versionMode = patch.versionMode;
+      if (patch.versionSource !== undefined) project.versionSource = patch.versionSource;
+      if (patch.versionResolvedAt !== undefined)
+        project.versionResolvedAt = patch.versionResolvedAt;
+      if (project.versionMode === 'manual') {
+        if (!project.versionLabel) throw new CatalogValidationError('手动版本标签不能为空');
+        project.versionSource = 'manual';
+      } else if (versionRequested) {
+        project = await this.prepareAutomaticVersion(project);
+      }
       if (patch.groupId !== undefined) project.groupId = patch.groupId;
       if (patch.order !== undefined) project.order = patch.order;
       if (patch.watcherEnabled !== undefined) {
@@ -171,7 +222,7 @@ export class CatalogService {
 
   async relocateProject(projectId: string, rootPathInput: string): Promise<ProjectRecord> {
     return this.enqueue(async () => {
-      const project = this.getProject(projectId);
+      let project = this.getProject(projectId);
       const rootPath = normalizeProjectRoot(rootPathInput);
       if (
         this.state.projects.some(
@@ -189,6 +240,8 @@ export class CatalogService {
       project.available = true;
       project.watcherState = project.watcherEnabled ? 'scanning' : 'paused';
       delete project.error;
+      if (project.versionMode === 'automatic')
+        project = await this.prepareAutomaticVersion(project);
       await this.store.save(this.state);
       const result = structuredClone(project);
       void Promise.resolve(this.options.startMonitoring?.(result)).catch(() => undefined);
@@ -277,5 +330,56 @@ export class CatalogService {
       await this.store.save(this.state);
       return structuredClone(project);
     });
+  }
+
+  async refreshVersion(projectId: string): Promise<ProjectRecord> {
+    return this.enqueue(async () => {
+      let project = this.getProject(projectId);
+      if (project.versionMode === 'automatic') {
+        project = await this.prepareAutomaticVersion(project);
+        await this.store.save(this.state);
+      }
+      return structuredClone(project);
+    });
+  }
+
+  private versionContext(project: ProjectRecord): {
+    versionLabel: string;
+    versionMode: VersionMode;
+    versionSource: VersionSource;
+  } {
+    return {
+      versionLabel: project.versionLabel,
+      versionMode: project.versionMode,
+      versionSource: project.versionSource,
+    };
+  }
+
+  private sameVersionContext(
+    left: ReturnType<CatalogService['versionContext']>,
+    right: ReturnType<CatalogService['versionContext']>,
+  ): boolean {
+    return (
+      left.versionLabel === right.versionLabel &&
+      left.versionMode === right.versionMode &&
+      left.versionSource === right.versionSource
+    );
+  }
+
+  private async prepareAutomaticVersion(project: ProjectRecord): Promise<ProjectRecord> {
+    if (!this.options.resolveVersion) return project;
+    try {
+      const resolved = await this.options.resolveVersion(structuredClone(project));
+      project.versionLabel = resolved.versionLabel.trim();
+      project.versionMode = 'automatic';
+      project.versionSource = resolved.versionSource;
+      project.versionResolvedAt = resolved.versionResolvedAt;
+    } catch {
+      project.versionLabel = '';
+      project.versionMode = 'automatic';
+      project.versionSource = 'workspace';
+      project.versionResolvedAt = new Date().toISOString();
+    }
+    return project;
   }
 }

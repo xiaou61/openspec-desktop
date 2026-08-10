@@ -10,6 +10,8 @@ import {
   groupMutationRequestSchema,
   historyListRequestSchema,
   historyRevisionListRequestSchema,
+  refreshVersionRequestSchema,
+  versionSummaryListRequestSchema,
   projectIdRequestSchema,
   openExternalRequestSchema,
   registerProjectRequestSchema,
@@ -50,10 +52,17 @@ const desktopApi: DesktopApi = {
     ipcRenderer.invoke('catalog:remove-group', groupMutationRequestSchema.parse(request)),
   rescanProject: (request) =>
     ipcRenderer.invoke('project:rescan', projectIdRequestSchema.parse(request)),
+  refreshVersion: (request) =>
+    ipcRenderer.invoke('project:refresh-version', refreshVersionRequestSchema.parse(request)),
   listRevisions: (request) =>
     ipcRenderer.invoke('history:list-revisions', historyRevisionListRequestSchema.parse(request)),
   listActivity: (request) =>
     ipcRenderer.invoke('history:list-activity', historyListRequestSchema.parse(request)),
+  listVersionSummaries: (request) =>
+    ipcRenderer.invoke(
+      'history:list-version-summaries',
+      versionSummaryListRequestSchema.parse(request),
+    ),
   compareRevisions: (request) =>
     ipcRenderer.invoke('history:compare', compareRevisionsRequestSchema.parse(request)),
   clearHistory: (request) =>

@@ -9,6 +9,8 @@ import {
   groupMutationRequestSchema,
   historyListRequestSchema,
   historyRevisionListRequestSchema,
+  refreshVersionRequestSchema,
+  versionSummaryListRequestSchema,
   setRetentionRequestSchema,
   ipcChannelSchema,
   openExternalRequestSchema,
@@ -100,6 +102,9 @@ export function createIpcRouter(controller: AppController): IpcRouter {
   router.add('project:rescan', projectIdRequestSchema, (request) =>
     controller.rescanProject(request.projectId),
   );
+  router.add('project:refresh-version', refreshVersionRequestSchema, (request) =>
+    controller.refreshVersion(request),
+  );
   router.add('project:get-snapshot', projectIdRequestSchema, (request) => {
     const project = controller
       .getAppSnapshot()
@@ -112,6 +117,9 @@ export function createIpcRouter(controller: AppController): IpcRouter {
   );
   router.add('history:list-activity', historyListRequestSchema, (request) =>
     controller.listActivity(request),
+  );
+  router.add('history:list-version-summaries', versionSummaryListRequestSchema, (request) =>
+    controller.listVersionSummaries(request),
   );
   router.add('history:compare', compareRevisionsRequestSchema, (request) =>
     controller.compareRevisions(request),

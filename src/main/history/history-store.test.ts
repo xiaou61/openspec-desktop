@@ -2,7 +2,12 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { HistoryStore } from './history-store';
+import {
+  HistoryStore,
+  WORKSPACE_VERSION_KEY,
+  versionDisplayLabel,
+  versionKeyForLabel,
+} from './history-store';
 
 describe('HistoryStore', () => {
   it('deduplicates exact content hashes and records task deltas', async () => {
@@ -84,6 +89,92 @@ describe('HistoryStore', () => {
     } finally {
       await fs.rm(userData, { recursive: true, force: true });
       await fs.rm(source, { recursive: true, force: true });
+    }
+  });
+
+  it('aggregates versions from immutable records and filters before cursor pagination', async () => {
+    const userData = await fs.mkdtemp(join(tmpdir(), 'openspec-history-versions-'));
+    try {
+      const history = new HistoryStore(userData, 'project-versions');
+      await history.recordRevision({
+        relativePath: 'changes/demo/tasks.md',
+        artifactType: 'tasks',
+        content: 'workspace\n',
+        changeId: 'demo',
+        projectVersion: '',
+        createdAt: '2026-08-07T00:00:00.000Z',
+      });
+      await history.recordRevision({
+        relativePath: 'changes/demo/tasks.md',
+        artifactType: 'tasks',
+        content: 'v1 first\n',
+        changeId: 'demo',
+        projectVersion: 'v1.0.0',
+        createdAt: '2026-08-07T00:01:00.000Z',
+      });
+      await history.recordRevision({
+        relativePath: 'changes/other/tasks.md',
+        artifactType: 'tasks',
+        content: 'v2\n',
+        changeId: 'other',
+        projectVersion: 'v2.0.0',
+        createdAt: '2026-08-07T00:02:00.000Z',
+      });
+      await history.recordRevision({
+        relativePath: 'changes/literal-workspace/tasks.md',
+        artifactType: 'tasks',
+        content: 'literal workspace version\n',
+        changeId: 'literal-workspace',
+        projectVersion: 'workspace',
+        createdAt: '2026-08-07T00:02:30.000Z',
+      });
+      await history.recordActivity({
+        kind: 'project-settings',
+        createdAt: '2026-08-07T00:03:00.000Z',
+        projectVersion: 'v1.0.0',
+        summary: '切换版本',
+        changeId: 'demo',
+      });
+
+      expect(versionKeyForLabel('   ')).toBe(WORKSPACE_VERSION_KEY);
+      expect(versionKeyForLabel('workspace')).toBe('version:workspace');
+      expect(versionDisplayLabel('')).toBe('当前工作区');
+      const summaries = await history.listVersionSummaries('v1.0.0', 'manual');
+      expect(summaries.currentKey).toBe('version:v1.0.0');
+      expect(summaries.items).toHaveLength(4);
+      expect(summaries.items[0]).toMatchObject({
+        key: 'version:v1.0.0',
+        label: 'v1.0.0',
+        source: 'manual',
+        isCurrent: true,
+        activityCount: 2,
+        revisionCount: 1,
+        changeIds: ['demo'],
+      });
+      expect(summaries.items.find((item) => item.key === 'workspace')).toMatchObject({
+        label: '当前工作区',
+        changeIds: ['demo'],
+      });
+      expect(summaries.items.find((item) => item.key === 'version:v2.0.0')?.changeIds).toEqual([
+        'other',
+      ]);
+      expect(summaries.items.find((item) => item.key === 'version:workspace')).toMatchObject({
+        label: 'workspace',
+        changeIds: ['literal-workspace'],
+      });
+
+      const filtered = await history.listActivity({ versionKey: WORKSPACE_VERSION_KEY, limit: 1 });
+      expect(filtered.items).toHaveLength(1);
+      expect(filtered.items[0]?.projectVersion).toBe('');
+      expect(filtered.nextCursor).toBeNull();
+      const v1Revisions = await history.listRevisions('changes/demo/tasks.md', {
+        versionKey: versionKeyForLabel('v1.0.0'),
+        limit: 1,
+      });
+      expect(v1Revisions.items).toHaveLength(1);
+      expect(v1Revisions.items[0]?.projectVersion).toBe('v1.0.0');
+    } finally {
+      await fs.rm(userData, { recursive: true, force: true });
     }
   });
 });

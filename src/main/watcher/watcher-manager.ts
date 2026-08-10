@@ -20,6 +20,7 @@ export interface WatcherManagerOptions {
 export class WatcherManager {
   private readonly watchers = new Map<string, ProjectWatcher>();
   private readonly history = new Map<string, HistoryStore>();
+  private readonly projectContexts = new Map<string, ProjectRecord>();
   private closed = false;
 
   constructor(private readonly options: WatcherManagerOptions = {}) {}
@@ -28,6 +29,7 @@ export class WatcherManager {
     if (this.closed) return;
     await this.stopProject(project.id);
     if (this.closed) return;
+    this.projectContexts.set(project.id, structuredClone(project));
     const history =
       this.options.historyFactory?.(project) ??
       (this.options.userDataPath
@@ -37,7 +39,7 @@ export class WatcherManager {
     const watcherOptions: ProjectWatcherOptions = {
       project,
       onState: (state, error) => this.options.onState?.(project.id, state, error),
-      onProjection: (event) => this.handleProjection(event, project, history),
+      onProjection: (event) => this.handleProjection(event, history),
     };
     if (this.options.settleMs !== undefined) watcherOptions.settleMs = this.options.settleMs;
     if (this.options.batchMs !== undefined) watcherOptions.batchMs = this.options.batchMs;
@@ -54,6 +56,12 @@ export class WatcherManager {
     const history = this.history.get(projectId);
     if (history) await history.flush();
     this.history.delete(projectId);
+    this.projectContexts.delete(projectId);
+  }
+
+  updateProjectContext(project: ProjectRecord): void {
+    if (this.closed) return;
+    this.projectContexts.set(project.id, structuredClone(project));
   }
 
   async rescanProject(projectId: string): Promise<void> {
@@ -76,6 +84,7 @@ export class WatcherManager {
     await Promise.all(projectIds.map((projectId) => this.stopProject(projectId)));
     await Promise.all([...this.history.values()].map((history) => history.flush()));
     this.history.clear();
+    this.projectContexts.clear();
   }
 
   async flush(): Promise<void> {
@@ -84,9 +93,9 @@ export class WatcherManager {
 
   private async handleProjection(
     event: WatcherProjection,
-    project: ProjectRecord,
     history: HistoryStore | undefined,
   ): Promise<void> {
+    const projectVersion = this.projectContexts.get(event.projectId)?.versionLabel ?? '';
     if (history) {
       const previousFiles = new Map(
         event.previousSnapshot?.files.map((file) => [file.relativePath, file]),
@@ -106,7 +115,7 @@ export class WatcherManager {
           relativePath: artifact.relativePath,
           artifactType: artifact.type,
           content: artifact.rawContent,
-          projectVersion: project.versionLabel,
+          projectVersion,
           ...(artifact.changeId ? { changeId: artifact.changeId } : {}),
           ...(taskDelta ? { taskDelta } : {}),
         };

@@ -8,6 +8,7 @@ import { WatcherManager } from './watcher/watcher-manager';
 import { createWindowOptions } from './window-options';
 import { denyPermissionCheck, denyPermissionRequest } from './security/permission-policy';
 import { applyWindowSecurity } from './security/window-policy';
+import { resolveProjectVersion } from './domain/project-version-resolver';
 
 let mainWindow: BrowserWindow | null = null;
 let watcherManager: WatcherManager | null = null;
@@ -51,6 +52,7 @@ async function createServices(): Promise<AppController> {
   catalogService = new CatalogService(new CatalogStore(userDataPath), {
     startMonitoring: (project) => watcherManager?.startProject(project),
     stopMonitoring: (projectId) => watcherManager?.stopProject(projectId),
+    resolveVersion: (project) => resolveProjectVersion(project.rootPath),
   });
   activeController = new AppController({
     userDataPath,

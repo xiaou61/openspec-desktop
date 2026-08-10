@@ -23,6 +23,8 @@ describe('WatcherManager', () => {
         rootPath: root,
         displayName: 'Shutdown project',
         versionLabel: '',
+        versionMode: 'automatic',
+        versionSource: 'workspace',
         groupId: null,
         order: 0,
         watcherEnabled: true,
@@ -62,6 +64,8 @@ describe('WatcherManager', () => {
         rootPath: root,
         displayName: 'Manager project',
         versionLabel: 'v1',
+        versionMode: 'manual',
+        versionSource: 'manual',
         groupId: null,
         order: 0,
         watcherEnabled: true,
@@ -71,9 +75,29 @@ describe('WatcherManager', () => {
       });
       await fs.writeFile(tasksPath, '# Tasks\n- [x] one\n');
       await waitFor(() => events.length >= 2);
+      const current = {
+        id: 'manager-project',
+        rootPath: root,
+        displayName: 'Manager project',
+        versionLabel: 'v2',
+        versionMode: 'manual' as const,
+        versionSource: 'manual' as const,
+        groupId: null,
+        order: 0,
+        watcherEnabled: true,
+        watcherState: 'watching' as const,
+        available: true,
+        registeredAt: new Date().toISOString(),
+      };
+      manager.updateProjectContext(current);
+      await fs.writeFile(tasksPath, '# Tasks\n- [x] one\n- [ ] two\n');
+      await waitFor(() => events.length >= 3);
       const history = manager.getHistory('manager-project');
       expect(history).toBeDefined();
-      expect((await history!.listRevisions('changes/demo/tasks.md')).items.length).toBe(2);
+      const revisions = (await history!.listRevisions('changes/demo/tasks.md')).items;
+      expect(revisions.length).toBe(3);
+      expect(revisions[0]?.projectVersion).toBe('v2');
+      expect(revisions.some((revision) => revision.projectVersion === 'v1')).toBe(true);
       await manager.closeAll();
     } finally {
       await fs.rm(userData, { recursive: true, force: true });

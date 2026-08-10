@@ -219,6 +219,107 @@ test.describe('packaged Electron repository monitor', () => {
     }
   });
 
+  test('resolves a package version and associates live history after a manual switch', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'openspec-electron-version-project-'));
+    const userDataPath = await fs.mkdtemp(join(tmpdir(), 'openspec-electron-version-data-'));
+    const changeId = 'version-context-check';
+    const changeRoot = join(projectRoot, 'openspec', 'changes', changeId);
+    const tasksPath = join(changeRoot, 'tasks.md');
+    const now = new Date().toISOString();
+    const projectId = 'version-context-project';
+    const catalog = {
+      schemaVersion: 2,
+      groups: [],
+      projects: [
+        {
+          id: projectId,
+          rootPath: projectRoot,
+          displayName: '版本上下文验收项目',
+          versionLabel: '',
+          versionMode: 'automatic',
+          versionSource: 'workspace',
+          versionResolvedAt: now,
+          groupId: null,
+          order: 0,
+          watcherEnabled: true,
+          watcherState: 'scanning',
+          available: true,
+          registeredAt: now,
+        },
+      ],
+      preferences: {
+        selectedProjectId: projectId,
+        selectedChangeId: changeId,
+        showArchived: false,
+        windowBounds: { width: 1280, height: 820 },
+      },
+    };
+    let app: Awaited<ReturnType<typeof electron.launch>> | undefined;
+    try {
+      await fs.mkdir(join(changeRoot, 'specs', 'version-context'), { recursive: true });
+      await fs.writeFile(join(projectRoot, 'package.json'), '{"version":"1.2.3"}\n');
+      await fs.writeFile(join(projectRoot, 'openspec', 'config.yaml'), 'schema: spec-driven\n');
+      await fs.writeFile(join(changeRoot, 'proposal.md'), '# 版本上下文验收\n');
+      await fs.writeFile(join(changeRoot, 'design.md'), '# 设计\n');
+      await fs.writeFile(
+        join(changeRoot, 'specs', 'version-context', 'spec.md'),
+        '# 版本关联规格\n',
+      );
+      await fs.writeFile(join(changeRoot, '.openspec.yaml'), 'schema: spec-driven\n');
+      await fs.writeFile(tasksPath, '# 任务\n\n- [ ] 监听版本切换\n');
+      await fs.writeFile(
+        join(userDataPath, 'catalog.json'),
+        `${JSON.stringify(catalog, null, 2)}\n`,
+      );
+
+      app = await electron.launch({
+        executablePath: electronPath,
+        args: launchArgs(userDataPath),
+        env: {
+          ...process.env,
+          ELECTRON_RENDERER_URL: '',
+          OPENSPEC_DESKTOP_USER_DATA: userDataPath,
+        },
+        timeout: 30_000,
+      });
+      const window = await app.firstWindow();
+      await expect(window.getByRole('heading', { name: changeId })).toBeVisible({
+        timeout: 15_000,
+      });
+      const automaticTrigger = window.getByRole('button', {
+        name: '当前版本 1.2.3，打开版本菜单',
+      });
+      await expect(automaticTrigger).toBeVisible({ timeout: 15_000 });
+      await automaticTrigger.click();
+      await expect(window.getByRole('menu').getByText('package.json')).toBeVisible();
+      await window.getByRole('menuitem', { name: '项目与版本设置' }).click();
+
+      const settings = window.getByRole('dialog', { name: '版本上下文验收项目' });
+      await settings.getByRole('button', { name: '手动设置' }).click();
+      await settings.getByPlaceholder('例如 v1.2.0').fill('2.0.0');
+      await settings.getByRole('button', { name: '保存', exact: true }).click();
+      await expect(
+        window.getByRole('button', { name: '当前版本 2.0.0，打开版本菜单' }),
+      ).toBeVisible({ timeout: 15_000 });
+
+      await fs.writeFile(tasksPath, '# 任务\n\n- [x] 监听版本切换\n');
+      const changeRow = window.getByRole('listitem').filter({ hasText: changeId });
+      await expect(changeRow.getByText('1/1 任务')).toBeVisible({ timeout: 15_000 });
+      await window.getByRole('tab', { name: '活动' }).click();
+      await expect(
+        window.locator('.activity-group > header').filter({ hasText: '2.0.0' }),
+      ).toBeVisible({ timeout: 15_000 });
+      await expect(
+        window.locator('.activity-group > header').filter({ hasText: '1.2.3' }),
+      ).toBeVisible({ timeout: 15_000 });
+      await expect(window.getByText('任务变化：完成 +1，总数 0')).toBeVisible();
+    } finally {
+      await app?.close();
+      await fs.rm(projectRoot, { recursive: true, force: true });
+      await fs.rm(userDataPath, { recursive: true, force: true });
+    }
+  });
+
   test('captures long-content, parse-error, focus, and minimum-window states', async () => {
     const projectRoot = await fs.mkdtemp(join(tmpdir(), 'openspec-electron-visual-project-'));
     const userDataPath = await fs.mkdtemp(join(tmpdir(), 'openspec-electron-visual-data-'));
@@ -226,6 +327,7 @@ test.describe('packaged Electron repository monitor', () => {
     const changeRoot = join(projectRoot, 'openspec', 'changes', changeId);
     const verificationRoot = resolve('release', 'verification');
     const now = new Date().toISOString();
+    const longVersionLabel = `2026.08-${'release-candidate-'.repeat(8)}`.slice(0, 120);
     const catalog = {
       schemaVersion: 1,
       groups: [],
@@ -234,7 +336,7 @@ test.describe('packaged Electron repository monitor', () => {
           id: 'visual-project',
           rootPath: projectRoot,
           displayName: 'OpenSpec desktop visual verification project with a long name',
-          versionLabel: '2026.08-visual-verification',
+          versionLabel: longVersionLabel,
           groupId: null,
           order: 0,
           watcherEnabled: true,
@@ -309,6 +411,16 @@ test.describe('packaged Electron repository monitor', () => {
       await expect(window.getByRole('heading', { name: changeId })).toBeVisible({
         timeout: 15_000,
       });
+      const versionTrigger = window.getByRole('button', {
+        name: `当前版本 ${longVersionLabel}，打开版本菜单`,
+      });
+      await expect(versionTrigger).toBeVisible();
+      const versionBounds = await versionTrigger.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return { left: bounds.left, right: bounds.right, viewport: globalThis.innerWidth };
+      });
+      expect(versionBounds.left).toBeGreaterThanOrEqual(0);
+      expect(versionBounds.right).toBeLessThanOrEqual(versionBounds.viewport);
       await expect(window.getByText('实时监控', { exact: true }).first()).toBeVisible({
         timeout: 15_000,
       });

@@ -40,6 +40,8 @@ function fixture(): AppSnapshot {
     rootPath: 'C:/Projects/demo',
     displayName: 'Demo project',
     versionLabel: 'v1',
+    versionMode: 'manual' as const,
+    versionSource: 'manual' as const,
     groupId: null,
     order: 0,
     watcherEnabled: true,
@@ -49,7 +51,7 @@ function fixture(): AppSnapshot {
   };
   return {
     catalog: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       groups: [],
       projects: [project],
       preferences: {
@@ -93,6 +95,8 @@ describe('desktop workspace', () => {
       updateGroup: vi.fn(),
       removeGroup: vi.fn(),
       rescanProject: vi.fn(),
+      refreshVersion: vi.fn(),
+      listVersionSummaries: vi.fn().mockResolvedValue({ items: [], currentKey: 'version:v1' }),
       listRevisions: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       listActivity: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       compareRevisions: vi.fn(),
@@ -139,6 +143,8 @@ describe('desktop workspace', () => {
       updateGroup: vi.fn(),
       removeGroup: vi.fn(),
       rescanProject: vi.fn(),
+      refreshVersion: vi.fn(),
+      listVersionSummaries: vi.fn().mockResolvedValue({ items: [], currentKey: 'version:v1' }),
       listRevisions: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       listActivity: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       compareRevisions: vi.fn(),
@@ -191,6 +197,8 @@ describe('desktop workspace', () => {
       updateGroup: vi.fn(),
       removeGroup: vi.fn(),
       rescanProject: vi.fn(),
+      refreshVersion: vi.fn(),
+      listVersionSummaries: vi.fn().mockResolvedValue({ items: [], currentKey: 'version:v1' }),
       listRevisions: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       listActivity: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       compareRevisions: vi.fn(),
@@ -231,6 +239,8 @@ describe('desktop workspace', () => {
       updateGroup: vi.fn(),
       removeGroup: vi.fn(),
       rescanProject: vi.fn(),
+      refreshVersion: vi.fn(),
+      listVersionSummaries: vi.fn().mockResolvedValue({ items: [], currentKey: 'version:v1' }),
       listRevisions: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       listActivity: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       compareRevisions: vi.fn(),
@@ -319,6 +329,8 @@ describe('desktop workspace', () => {
       updateGroup: vi.fn(),
       removeGroup: vi.fn(),
       rescanProject: vi.fn(),
+      refreshVersion: vi.fn(),
+      listVersionSummaries: vi.fn().mockResolvedValue({ items: [], currentKey: 'version:v1' }),
       listRevisions: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       listActivity: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       compareRevisions: vi.fn(),
@@ -398,6 +410,8 @@ describe('desktop workspace', () => {
       updateGroup: vi.fn(),
       removeGroup: vi.fn(),
       rescanProject: vi.fn(),
+      refreshVersion: vi.fn(),
+      listVersionSummaries: vi.fn().mockResolvedValue({ items: [], currentKey: 'version:v1' }),
       listRevisions: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       listActivity: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       compareRevisions: vi.fn(),
@@ -429,6 +443,129 @@ describe('desktop workspace', () => {
     await waitFor(() => expect(listCodexProjects).toHaveBeenCalledTimes(2));
   });
 
+  it('shows cross-version Change context, groups activity, and filters historical records', async () => {
+    const data = fixture();
+    data.catalog.projects[0]!.versionMode = 'automatic';
+    data.catalog.projects[0]!.versionSource = 'package-json';
+    const summaries = {
+      items: [
+        {
+          key: 'version:v1',
+          label: 'v1',
+          source: 'package-json' as const,
+          isCurrent: true,
+          activityCount: 1,
+          revisionCount: 1,
+          firstSeenAt: '2026-08-07T01:00:00.000Z',
+          lastSeenAt: '2026-08-07T01:02:00.000Z',
+          changeIds: ['demo'],
+        },
+        {
+          key: 'workspace',
+          label: '当前工作区',
+          isCurrent: false,
+          activityCount: 1,
+          revisionCount: 0,
+          firstSeenAt: '2026-08-06T01:00:00.000Z',
+          lastSeenAt: '2026-08-06T01:00:00.000Z',
+          changeIds: ['demo'],
+        },
+      ],
+      currentKey: 'version:v1',
+    };
+    const listActivity = vi.fn((request: { versionKey?: string }) =>
+      Promise.resolve({
+        items: [
+          {
+            id: request.versionKey === 'workspace' ? 'activity-workspace' : 'activity-v1',
+            projectId: 'project-1',
+            kind: 'artifact-change' as const,
+            createdAt:
+              request.versionKey === 'workspace'
+                ? '2026-08-06T01:00:00.000Z'
+                : '2026-08-07T01:02:00.000Z',
+            relativePath: 'changes/demo/tasks.md',
+            changeId: 'demo',
+            artifactType: 'tasks' as const,
+            projectVersion: request.versionKey === 'workspace' ? '' : 'v1',
+            summary: 'tasks.md 已更新',
+          },
+        ],
+        nextCursor: null,
+      }),
+    );
+    const api = {
+      runtime: { platform: 'win32' },
+      getSnapshot: vi.fn().mockResolvedValue(data),
+      updatePreferences: vi.fn().mockResolvedValue(data),
+      selectProject: vi.fn(),
+      registerProject: vi.fn(),
+      listCodexProjects: vi.fn().mockResolvedValue({
+        candidates: [],
+        summary: { source: 'primary', candidateCount: 0, availableCount: 0, truncated: false },
+        scannedAt: new Date().toISOString(),
+      }),
+      importCodexProjects: vi.fn(),
+      updateProject: vi.fn().mockResolvedValue(data),
+      relocateProject: vi.fn(),
+      selectRelocation: vi.fn(),
+      unregisterProject: vi.fn(),
+      createGroup: vi.fn(),
+      updateGroup: vi.fn(),
+      removeGroup: vi.fn(),
+      rescanProject: vi.fn(),
+      refreshVersion: vi.fn().mockResolvedValue(data),
+      listVersionSummaries: vi.fn().mockResolvedValue(summaries),
+      listRevisions: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+      listActivity,
+      compareRevisions: vi.fn(),
+      clearHistory: vi.fn(),
+      getRetention: vi
+        .fn()
+        .mockResolvedValue({ revisionsPerArtifact: 50, activityPerProject: 1000 }),
+      setRetention: vi
+        .fn()
+        .mockResolvedValue({ revisionsPerArtifact: 50, activityPerProject: 1000 }),
+      revealArtifact: vi.fn(),
+      revealUserData: vi.fn(),
+      getUserDataPath: vi.fn().mockResolvedValue('C:/data'),
+      openExternal: vi.fn(),
+      onProjection: vi.fn().mockReturnValue(() => undefined),
+    } as unknown as DesktopApi;
+    Object.defineProperty(window, 'desktop', { configurable: true, value: api });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'demo' });
+    expect(await screen.findByText(/跨 2 个版本/)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /当前版本 v1/ }));
+    expect(screen.getByText('package.json')).toBeVisible();
+    expect(screen.getByRole('menuitem', { name: /当前工作区/ })).toBeVisible();
+    await user.click(screen.getByRole('menuitem', { name: /当前工作区/ }));
+    expect(screen.getByRole('tab', { name: '活动' })).toHaveAttribute('data-state', 'active');
+    const filter = screen.getByRole('combobox', { name: '筛选历史版本' });
+    await user.selectOptions(filter, 'workspace');
+    await waitFor(() =>
+      expect(listActivity).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: 'project-1', versionKey: 'workspace' }),
+      ),
+    );
+    expect(screen.getAllByText('当前工作区').length).toBeGreaterThan(0);
+
+    const settingsTrigger = screen.getAllByRole('button', { name: '项目设置' }).at(-1)!;
+    await user.click(settingsTrigger);
+    await user.click(screen.getByRole('button', { name: '手动设置' }));
+    const manualInput = screen.getByPlaceholderText('例如 v1.2.0');
+    await user.clear(manualInput);
+    await user.click(screen.getByRole('button', { name: '保存' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('不能为空');
+    await user.type(manualInput, 'v2');
+    await user.click(screen.getByRole('button', { name: '保存' }));
+    expect(api.updateProject).toHaveBeenCalledWith(
+      expect.objectContaining({ versionMode: 'manual', versionLabel: 'v2' }),
+    );
+  });
+
   it('shows a recoverable error when the Codex project index cannot be read', async () => {
     const data = fixture();
     const api = {
@@ -447,6 +584,8 @@ describe('desktop workspace', () => {
       updateGroup: vi.fn(),
       removeGroup: vi.fn(),
       rescanProject: vi.fn(),
+      refreshVersion: vi.fn(),
+      listVersionSummaries: vi.fn().mockResolvedValue({ items: [], currentKey: 'version:v1' }),
       listRevisions: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       listActivity: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       compareRevisions: vi.fn(),

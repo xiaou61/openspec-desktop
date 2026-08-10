@@ -174,21 +174,39 @@ export const projectGroupSchema = z
   .strict();
 export type ProjectGroup = z.infer<typeof projectGroupSchema>;
 
+export const versionModeSchema = z.enum(['automatic', 'manual']);
+export type VersionMode = z.infer<typeof versionModeSchema>;
+
+export const versionSourceSchema = z.enum(['git-tag', 'package-json', 'manual', 'workspace']);
+export type VersionSource = z.infer<typeof versionSourceSchema>;
+
+export const versionKeySchema = z.string().min(1).max(128);
+
+const legacyProjectRecordShape = {
+  id: localIdSchema,
+  rootPath: z.string().min(1),
+  displayName: z.string().min(1).max(160),
+  versionLabel: z.string().max(120),
+  groupId: localIdSchema.nullable(),
+  order: z.number().int().nonnegative(),
+  watcherEnabled: z.boolean(),
+  watcherState: watcherStateSchema,
+  available: z.boolean(),
+  registeredAt: z.string().min(1),
+  lastScannedAt: z.string().optional(),
+  lastActivityAt: z.string().optional(),
+  error: z.string().optional(),
+} as const;
+
+export const legacyProjectRecordSchema = z.object(legacyProjectRecordShape).strict();
+export type LegacyProjectRecord = z.infer<typeof legacyProjectRecordSchema>;
+
 export const projectRecordSchema = z
   .object({
-    id: localIdSchema,
-    rootPath: z.string().min(1),
-    displayName: z.string().min(1).max(160),
-    versionLabel: z.string().max(120),
-    groupId: localIdSchema.nullable(),
-    order: z.number().int().nonnegative(),
-    watcherEnabled: z.boolean(),
-    watcherState: watcherStateSchema,
-    available: z.boolean(),
-    registeredAt: z.string().min(1),
-    lastScannedAt: z.string().optional(),
-    lastActivityAt: z.string().optional(),
-    error: z.string().optional(),
+    ...legacyProjectRecordShape,
+    versionMode: versionModeSchema,
+    versionSource: versionSourceSchema,
+    versionResolvedAt: z.string().min(1).optional(),
   })
   .strict();
 export type ProjectRecord = z.infer<typeof projectRecordSchema>;
@@ -268,26 +286,37 @@ export const projectionEventSchema = z
   .strict();
 export type ProjectionEvent = z.infer<typeof projectionEventSchema>;
 
-export const catalogStateSchema = z
+export const catalogPreferencesSchema = z
+  .object({
+    selectedProjectId: localIdSchema.nullable(),
+    selectedChangeId: localIdSchema.nullable(),
+    showArchived: z.boolean(),
+    windowBounds: z
+      .object({
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+        x: z.number().int().optional(),
+        y: z.number().int().optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const catalogStateV1Schema = z
   .object({
     schemaVersion: z.literal(1),
     groups: z.array(projectGroupSchema),
+    projects: z.array(legacyProjectRecordSchema),
+    preferences: catalogPreferencesSchema,
+  })
+  .strict();
+
+export const catalogStateSchema = z
+  .object({
+    schemaVersion: z.literal(2),
+    groups: z.array(projectGroupSchema),
     projects: z.array(projectRecordSchema),
-    preferences: z
-      .object({
-        selectedProjectId: localIdSchema.nullable(),
-        selectedChangeId: localIdSchema.nullable(),
-        showArchived: z.boolean(),
-        windowBounds: z
-          .object({
-            width: z.number().int().positive(),
-            height: z.number().int().positive(),
-            x: z.number().int().optional(),
-            y: z.number().int().optional(),
-          })
-          .strict(),
-      })
-      .strict(),
+    preferences: catalogPreferencesSchema,
   })
   .strict();
 export type CatalogState = z.infer<typeof catalogStateSchema>;
@@ -359,6 +388,29 @@ export const activityPageSchema = z
   })
   .strict();
 export type ActivityPage = z.infer<typeof activityPageSchema>;
+
+export const versionSummarySchema = z
+  .object({
+    key: versionKeySchema,
+    label: z.string().min(1).max(120),
+    source: versionSourceSchema.optional(),
+    isCurrent: z.boolean(),
+    activityCount: z.number().int().nonnegative(),
+    revisionCount: z.number().int().nonnegative(),
+    firstSeenAt: z.string().min(1),
+    lastSeenAt: z.string().min(1),
+    changeIds: z.array(localIdSchema),
+  })
+  .strict();
+export type VersionSummary = z.infer<typeof versionSummarySchema>;
+
+export const versionSummaryListSchema = z
+  .object({
+    items: z.array(versionSummarySchema).max(500),
+    currentKey: versionKeySchema,
+  })
+  .strict();
+export type VersionSummaryList = z.infer<typeof versionSummaryListSchema>;
 
 export const diffHunkSchema = z
   .object({

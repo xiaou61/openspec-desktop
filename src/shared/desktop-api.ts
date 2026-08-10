@@ -7,6 +7,7 @@ import type {
   RevisionComparison,
   RevisionPage,
   RetentionSettings,
+  VersionSummaryList,
 } from './contracts';
 import type {
   ClearHistoryRequest,
@@ -16,6 +17,7 @@ import type {
   GroupMutationRequest,
   HistoryListRequest,
   HistoryRevisionListRequest,
+  RefreshVersionRequest,
   RegisterProjectRequest,
   RelocateProjectRequest,
   SelectRelocationRequest,
@@ -23,6 +25,7 @@ import type {
   SetRetentionRequest,
   UpdateProjectRequest,
   UpdatePreferencesRequest,
+  VersionSummaryListRequest,
 } from './ipc-contracts';
 
 export interface DesktopApi {
@@ -43,8 +46,10 @@ export interface DesktopApi {
   updateGroup(request: GroupMutationRequest): Promise<AppSnapshot>;
   removeGroup(request: { groupId: string }): Promise<AppSnapshot>;
   rescanProject(request: { projectId: string }): Promise<AppSnapshot>;
+  refreshVersion(request: RefreshVersionRequest): Promise<AppSnapshot>;
   listRevisions(request: HistoryRevisionListRequest): Promise<RevisionPage>;
   listActivity(request: HistoryListRequest): Promise<ActivityPage>;
+  listVersionSummaries(request: VersionSummaryListRequest): Promise<VersionSummaryList>;
   compareRevisions(request: CompareRevisionsRequest): Promise<RevisionComparison>;
   clearHistory(request: ClearHistoryRequest): Promise<AppSnapshot>;
   getRetention(request: { projectId: string }): Promise<RetentionSettings>;

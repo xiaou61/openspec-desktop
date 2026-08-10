@@ -19,6 +19,7 @@ function watcherStub(): WatcherManager {
     startProject: vi.fn(),
     stopProject: vi.fn(),
     rescanProject: vi.fn(),
+    updateProjectContext: vi.fn(),
     getHistory: vi.fn(),
     flush: vi.fn(),
   } as unknown as WatcherManager;
@@ -48,7 +49,14 @@ describe('AppController Codex import', () => {
           'project-order': ['valid', 'missing'],
         }),
       );
-      const catalog = new CatalogService(new CatalogStore(userDataPath));
+      const catalog = new CatalogService(new CatalogStore(userDataPath), {
+        resolveVersion: async () => ({
+          versionLabel: '',
+          versionMode: 'automatic',
+          versionSource: 'workspace',
+          versionResolvedAt: new Date().toISOString(),
+        }),
+      });
       const controller = new AppController({
         userDataPath,
         userHome: root,
@@ -72,6 +80,11 @@ describe('AppController Codex import', () => {
       expect(imported.items.map((item) => item.status)).toEqual(['imported', 'failed']);
       expect(imported.items[0]?.displayName).toBe('有效项目');
       expect(imported.snapshot.catalog.projects).toHaveLength(1);
+      expect(imported.snapshot.catalog.projects[0]).toMatchObject({
+        versionLabel: '',
+        versionMode: 'automatic',
+        versionSource: 'workspace',
+      });
 
       const duplicate = await controller.importCodexProjects({
         projects: [{ rootPath: valid, displayName: '有效项目' }],
@@ -109,6 +122,65 @@ describe('AppController Codex import', () => {
         error: '该目录不在当前 Codex 项目索引中',
       });
       expect(result.snapshot.catalog.projects).toEqual([]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('AppController version lifecycle', () => {
+  it('propagates changed automatic versions, suppresses unchanged refresh noise, and preserves manual mode', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'app-controller-version-'));
+    try {
+      const userDataPath = join(root, 'user-data');
+      const projectRoot = await makeOpenSpecProject(root, 'project');
+      let resolvedLabel = 'v1.0.0';
+      const catalog = new CatalogService(new CatalogStore(userDataPath), {
+        resolveVersion: async () => ({
+          versionLabel: resolvedLabel,
+          versionMode: 'automatic',
+          versionSource: 'git-tag',
+          versionResolvedAt: new Date().toISOString(),
+        }),
+      });
+      const watchers = watcherStub();
+      const controller = new AppController({ userDataPath, catalog, watchers });
+      await controller.initialize();
+      await controller.registerProject({ rootPath: projectRoot, versionMode: 'automatic' });
+      const projectId = controller.getAppSnapshot().catalog.projects[0]!.id;
+      expect(controller.getAppSnapshot().catalog.projects[0]).toMatchObject({
+        versionLabel: 'v1.0.0',
+        versionMode: 'automatic',
+        versionSource: 'git-tag',
+      });
+
+      resolvedLabel = 'v1.1.0';
+      await controller.refreshVersion({ projectId });
+      await controller.refreshVersion({ projectId });
+      const afterRefresh = await controller.listActivity({ projectId, limit: 50 });
+      expect(afterRefresh.items).toHaveLength(1);
+      expect(afterRefresh.items[0]).toMatchObject({
+        kind: 'project-settings',
+        projectVersion: 'v1.1.0',
+      });
+      expect(watchers.updateProjectContext).toHaveBeenCalledWith(
+        expect.objectContaining({ versionLabel: 'v1.1.0' }),
+      );
+
+      await controller.updateProject({
+        projectId,
+        versionMode: 'manual',
+        versionLabel: 'v2.0.0',
+      });
+      resolvedLabel = 'v3.0.0';
+      await controller.rescanProject(projectId);
+      expect(controller.getAppSnapshot().catalog.projects[0]).toMatchObject({
+        versionLabel: 'v2.0.0',
+        versionMode: 'manual',
+        versionSource: 'manual',
+      });
+      const afterManual = await controller.listActivity({ projectId, limit: 50 });
+      expect(afterManual.items).toHaveLength(2);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

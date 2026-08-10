@@ -10,6 +10,7 @@ import {
   type CodexProjectList,
   type ProjectionEvent,
   type ProjectRecord,
+  type VersionSource,
   type WatcherState,
 } from '@shared/contracts';
 import type {
@@ -20,6 +21,7 @@ import type {
   GroupMutationRequest,
   HistoryListRequest,
   HistoryRevisionListRequest,
+  RefreshVersionRequest,
   RegisterProjectRequest,
   RelocateProjectRequest,
   SelectRelocationRequest,
@@ -27,6 +29,7 @@ import type {
   SetRetentionRequest,
   UpdatePreferencesRequest,
   UpdateProjectRequest,
+  VersionSummaryListRequest,
 } from '@shared/ipc-contracts';
 import { resolveRegisteredArtifactPath, isPathWithin } from './domain/paths';
 import type { ProjectScanResult } from './domain/scanner';
@@ -129,6 +132,7 @@ export class AppController {
     await this.options.catalog.registerProject(request.rootPath, {
       ...(request.displayName !== undefined ? { displayName: request.displayName } : {}),
       ...(request.versionLabel !== undefined ? { versionLabel: request.versionLabel } : {}),
+      ...(request.versionMode !== undefined ? { versionMode: request.versionMode } : {}),
       ...(request.groupId !== undefined ? { groupId: request.groupId } : {}),
     });
     return this.getAppSnapshot();
@@ -192,6 +196,7 @@ export class AppController {
       try {
         const project = await this.options.catalog.registerProject(candidate.rootPath, {
           displayName,
+          versionMode: 'automatic',
         });
         items.push({
           rootPath: project.rootPath,
@@ -248,6 +253,7 @@ export class AppController {
     await this.options.catalog.updateProject(request.projectId, {
       ...(request.displayName !== undefined ? { displayName: request.displayName } : {}),
       ...(request.versionLabel !== undefined ? { versionLabel: request.versionLabel } : {}),
+      ...(request.versionMode !== undefined ? { versionMode: request.versionMode } : {}),
       ...(request.groupId !== undefined ? { groupId: request.groupId } : {}),
       ...(request.order !== undefined ? { order: request.order } : {}),
       ...(request.watcherEnabled !== undefined ? { watcherEnabled: request.watcherEnabled } : {}),
@@ -257,20 +263,30 @@ export class AppController {
       await this.options.watchers.stopProject(after.id);
     if (!before.watcherEnabled && after.watcherEnabled)
       await this.options.watchers.startProject(after);
+    this.options.watchers.updateProjectContext(after);
+    if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
     return this.getAppSnapshot();
   }
 
   async relocateProject(request: RelocateProjectRequest): Promise<AppSnapshot> {
+    const before = structuredClone(this.options.catalog.getProject(request.projectId));
     await this.options.catalog.relocateProject(request.projectId, request.rootPath);
     this.scans.delete(request.projectId);
+    const after = this.options.catalog.getProject(request.projectId);
+    this.options.watchers.updateProjectContext(after);
+    if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
     return this.getAppSnapshot();
   }
 
   async selectRelocation(request: SelectRelocationRequest): Promise<AppSnapshot | null> {
     const rootPath = await selectOpenSpecProjectDirectory(this.directoryDialog);
     if (!rootPath) return null;
+    const before = structuredClone(this.options.catalog.getProject(request.projectId));
     await this.options.catalog.relocateProject(request.projectId, rootPath);
     this.scans.delete(request.projectId);
+    const after = this.options.catalog.getProject(request.projectId);
+    this.options.watchers.updateProjectContext(after);
+    if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
     return this.getAppSnapshot();
   }
 
@@ -299,7 +315,19 @@ export class AppController {
   }
 
   async rescanProject(projectId: string): Promise<AppSnapshot> {
+    const before = structuredClone(this.options.catalog.getProject(projectId));
+    const after = await this.options.catalog.refreshVersion(projectId);
+    this.options.watchers.updateProjectContext(after);
+    if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
     await this.options.watchers.rescanProject(projectId);
+    return this.getAppSnapshot();
+  }
+
+  async refreshVersion(request: RefreshVersionRequest): Promise<AppSnapshot> {
+    const before = structuredClone(this.options.catalog.getProject(request.projectId));
+    const after = await this.options.catalog.refreshVersion(request.projectId);
+    this.options.watchers.updateProjectContext(after);
+    if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
     return this.getAppSnapshot();
   }
 
@@ -309,6 +337,7 @@ export class AppController {
     const options = {
       limit: request.limit,
       ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
+      ...(request.versionKey !== undefined ? { versionKey: request.versionKey } : {}),
     };
     return history.listRevisions(request.relativePath ?? '', options);
   }
@@ -320,8 +349,15 @@ export class AppController {
       limit: request.limit,
       ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
       ...(request.changeId !== undefined ? { changeId: request.changeId } : {}),
+      ...(request.versionKey !== undefined ? { versionKey: request.versionKey } : {}),
     };
     return history.listActivity(options);
+  }
+
+  async listVersionSummaries(request: VersionSummaryListRequest) {
+    const project = this.options.catalog.getProject(request.projectId);
+    const history = await this.ensureHistory(request.projectId);
+    return history.listVersionSummaries(project.versionLabel, project.versionSource);
   }
 
   async compareRevisions(request: CompareRevisionsRequest) {
@@ -444,5 +480,30 @@ export class AppController {
     const history = new HistoryStore(this.options.userDataPath, projectId);
     await history.init();
     return history;
+  }
+
+  private versionContextChanged(before: ProjectRecord, after: ProjectRecord): boolean {
+    return (
+      before.versionLabel !== after.versionLabel ||
+      before.versionMode !== after.versionMode ||
+      before.versionSource !== after.versionSource
+    );
+  }
+
+  private async recordVersionContextActivity(project: ProjectRecord): Promise<void> {
+    const history = await this.ensureHistory(project.id);
+    const sourceLabels: Record<VersionSource, string> = {
+      'git-tag': 'Git 标签',
+      'package-json': 'package.json',
+      manual: '手动设置',
+      workspace: '当前工作区',
+    };
+    const label = project.versionLabel || '当前工作区';
+    await history.recordActivity({
+      kind: 'project-settings',
+      createdAt: new Date().toISOString(),
+      projectVersion: project.versionLabel,
+      summary: `版本上下文已更新为 ${label}（来源：${sourceLabels[project.versionSource]}）`,
+    });
   }
 }

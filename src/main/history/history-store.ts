@@ -14,7 +14,22 @@ import {
   type Revision,
   type RevisionComparison,
   type RetentionSettings,
+  type VersionSource,
+  type VersionSummaryList,
 } from '@shared/contracts';
+
+export const WORKSPACE_VERSION_KEY = 'workspace';
+export const VERSION_KEY_PREFIX = 'version:';
+
+export function versionKeyForLabel(label: string): string {
+  const normalized = label.trim();
+  return normalized ? `${VERSION_KEY_PREFIX}${normalized}` : WORKSPACE_VERSION_KEY;
+}
+
+export function versionDisplayLabel(label: string): string {
+  const normalized = label.trim();
+  return normalized || '当前工作区';
+}
 
 export const DEFAULT_RETENTION: RetentionSettings = {
   revisionsPerArtifact: 50,
@@ -233,13 +248,17 @@ export class HistoryStore {
 
   async listRevisions(
     relativePath: string,
-    options: { cursor?: string; limit?: number } = {},
+    options: { cursor?: string; limit?: number; versionKey?: string } = {},
   ): Promise<Page<Revision>> {
     await this.ready();
     const safePath = safeRelativePathSchema.parse(relativePath);
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
     const items = [...this.index.revisions]
       .filter((revision) => revision.relativePath === safePath)
+      .filter(
+        (revision) =>
+          !options.versionKey || versionKeyForLabel(revision.projectVersion) === options.versionKey,
+      )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
     const offset = cursorOffset(options.cursor);
     const page = items.slice(offset, offset + limit).map((revision) => structuredClone(revision));
@@ -250,12 +269,16 @@ export class HistoryStore {
   }
 
   async listActivity(
-    options: { cursor?: string; limit?: number; changeId?: string } = {},
+    options: { cursor?: string; limit?: number; changeId?: string; versionKey?: string } = {},
   ): Promise<Page<ActivityEntry>> {
     await this.ready();
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
     const items = [...this.index.activity]
       .filter((activity) => !options.changeId || activity.changeId === options.changeId)
+      .filter(
+        (activity) =>
+          !options.versionKey || versionKeyForLabel(activity.projectVersion) === options.versionKey,
+      )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
     const offset = cursorOffset(options.cursor);
     const page = items.slice(offset, offset + limit).map((activity) => structuredClone(activity));
@@ -263,6 +286,73 @@ export class HistoryStore {
       items: page,
       nextCursor: offset + page.length < items.length ? String(offset + page.length) : null,
     };
+  }
+
+  async listVersionSummaries(
+    currentProjectVersion: string,
+    currentSource?: VersionSource,
+  ): Promise<VersionSummaryList> {
+    await this.ready();
+    type SummaryAccumulator = {
+      key: string;
+      label: string;
+      source?: VersionSource;
+      activityCount: number;
+      revisionCount: number;
+      firstSeenAt: string;
+      lastSeenAt: string;
+      changeIds: Set<string>;
+    };
+    const summaries = new Map<string, SummaryAccumulator>();
+    const add = (
+      projectVersion: string,
+      createdAt: string,
+      kind: 'activity' | 'revision',
+      changeId?: string,
+    ): void => {
+      const key = versionKeyForLabel(projectVersion);
+      const existing = summaries.get(key);
+      const summary = existing ?? {
+        key,
+        label: versionDisplayLabel(projectVersion),
+        activityCount: 0,
+        revisionCount: 0,
+        firstSeenAt: createdAt,
+        lastSeenAt: createdAt,
+        changeIds: new Set<string>(),
+      };
+      if (kind === 'activity') summary.activityCount += 1;
+      else summary.revisionCount += 1;
+      if (createdAt < summary.firstSeenAt) summary.firstSeenAt = createdAt;
+      if (createdAt > summary.lastSeenAt) summary.lastSeenAt = createdAt;
+      if (changeId) summary.changeIds.add(changeId);
+      summaries.set(key, summary);
+    };
+
+    for (const revision of this.index.revisions)
+      add(revision.projectVersion, revision.createdAt, 'revision', revision.changeId);
+    for (const activity of this.index.activity)
+      add(activity.projectVersion, activity.createdAt, 'activity', activity.changeId);
+
+    const currentKey = versionKeyForLabel(currentProjectVersion);
+    const items = [...summaries.values()]
+      .map((summary) => ({
+        key: summary.key,
+        label: summary.label,
+        ...(summary.key === currentKey && currentSource ? { source: currentSource } : {}),
+        isCurrent: summary.key === currentKey,
+        activityCount: summary.activityCount,
+        revisionCount: summary.revisionCount,
+        firstSeenAt: summary.firstSeenAt,
+        lastSeenAt: summary.lastSeenAt,
+        changeIds: [...summary.changeIds].sort(),
+      }))
+      .sort((left, right) => {
+        if (left.isCurrent !== right.isCurrent) return left.isCurrent ? -1 : 1;
+        const byDate = right.lastSeenAt.localeCompare(left.lastSeenAt);
+        return byDate || left.label.localeCompare(right.label, 'zh-CN');
+      });
+    return { items, currentKey };
   }
 
   async compareRevisions(

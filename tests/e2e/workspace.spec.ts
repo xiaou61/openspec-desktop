@@ -1,5 +1,16 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { AppSnapshot } from '../../src/shared/contracts';
+import type {
+  ActivityEntry,
+  AppSnapshot,
+  Revision,
+  VersionSummaryList,
+} from '../../src/shared/contracts';
+
+interface HistoryFixture {
+  versionSummaries: VersionSummaryList;
+  activity: ActivityEntry[];
+  revisions: Revision[];
+}
 
 function fixture(): AppSnapshot {
   const longText = `${'long-content '.repeat(120)}\n\n<script>window.e2eUnsafe = true</script>`;
@@ -37,6 +48,8 @@ function fixture(): AppSnapshot {
     rootPath: 'C:/Projects/demo',
     displayName: 'Demo project',
     versionLabel: 'v1',
+    versionMode: 'manual' as const,
+    versionSource: 'manual' as const,
     groupId: null,
     order: 0,
     watcherEnabled: true,
@@ -46,7 +59,7 @@ function fixture(): AppSnapshot {
   };
   return {
     catalog: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       groups: [],
       projects: [project],
       preferences: {
@@ -79,76 +92,123 @@ function emptyFixture(): AppSnapshot {
   };
 }
 
-async function installDesktopFixture(page: Page, initialSnapshot = fixture()): Promise<void> {
-  await page.addInitScript((snapshot) => {
-    let listener: ((event: unknown) => void) | undefined;
-    const desktop = {
-      runtime: { platform: 'win32' },
-      getSnapshot: async () => snapshot,
-      updatePreferences: async () => snapshot,
-      selectProject: async () => snapshot,
-      registerProject: async () => snapshot,
-      listCodexProjects: async () => ({
-        candidates: [
-          {
-            id: 'codex-tooling',
-            displayName: 'Codex Tooling',
-            rootPath: 'C:/Projects/codex-tooling',
-            source: 'local-project',
-            lastUsedAt: '2026-08-07T08:30:00.000Z',
-            status: 'available',
-          },
-          {
-            id: 'codex-not-openspec',
-            displayName: 'Scratch workspace',
-            rootPath: 'C:/Projects/scratch-workspace',
-            source: 'saved-workspace',
-            status: 'invalid-openspec',
-            reason: '未发现 OpenSpec 项目结构',
-          },
-        ],
-        summary: { source: 'primary', candidateCount: 2, availableCount: 1, truncated: false },
-        scannedAt: '2026-08-07T08:30:00.000Z',
-      }),
-      importCodexProjects: async (input: {
-        projects: Array<{ rootPath: string; displayName: string }>;
-      }) => ({
-        snapshot,
-        items: input.projects.map((project) => ({ ...project, status: 'imported' })),
-      }),
-      updateProject: async () => snapshot,
-      relocateProject: async () => snapshot,
-      selectRelocation: async () => snapshot,
-      unregisterProject: async () => snapshot,
-      createGroup: async () => snapshot,
-      updateGroup: async () => snapshot,
-      removeGroup: async () => snapshot,
-      rescanProject: async () => snapshot,
-      listRevisions: async () => ({ items: [], nextCursor: null }),
-      listActivity: async () => ({ items: [], nextCursor: null }),
-      compareRevisions: async () => {
-        throw new Error('no revisions');
+async function installDesktopFixture(
+  page: Page,
+  initialSnapshot = fixture(),
+  history: Partial<HistoryFixture> = {},
+): Promise<void> {
+  const defaultVersionSummaries: VersionSummaryList = {
+    items: [],
+    currentKey: initialSnapshot.catalog.projects[0]?.versionLabel
+      ? `version:${initialSnapshot.catalog.projects[0].versionLabel.trim()}`
+      : 'workspace',
+  };
+  await page.addInitScript(
+    ({ snapshot, history: fixtureHistory }) => {
+      const updateProjectCalls: unknown[] = [];
+      let listener: ((event: unknown) => void) | undefined;
+      const desktop = {
+        runtime: { platform: 'win32' },
+        getSnapshot: async () => snapshot,
+        updatePreferences: async () => snapshot,
+        selectProject: async () => snapshot,
+        registerProject: async () => snapshot,
+        listCodexProjects: async () => ({
+          candidates: [
+            {
+              id: 'codex-tooling',
+              displayName: 'Codex Tooling',
+              rootPath: 'C:/Projects/codex-tooling',
+              source: 'local-project',
+              lastUsedAt: '2026-08-07T08:30:00.000Z',
+              status: 'available',
+            },
+            {
+              id: 'codex-not-openspec',
+              displayName: 'Scratch workspace',
+              rootPath: 'C:/Projects/scratch-workspace',
+              source: 'saved-workspace',
+              status: 'invalid-openspec',
+              reason: '未发现 OpenSpec 项目结构',
+            },
+          ],
+          summary: { source: 'primary', candidateCount: 2, availableCount: 1, truncated: false },
+          scannedAt: '2026-08-07T08:30:00.000Z',
+        }),
+        importCodexProjects: async (input: {
+          projects: Array<{ rootPath: string; displayName: string }>;
+        }) => ({
+          snapshot,
+          items: input.projects.map((project) => ({ ...project, status: 'imported' })),
+        }),
+        updateProject: async (input: unknown) => {
+          updateProjectCalls.push(input);
+          return snapshot;
+        },
+        relocateProject: async () => snapshot,
+        selectRelocation: async () => snapshot,
+        unregisterProject: async () => snapshot,
+        createGroup: async () => snapshot,
+        updateGroup: async () => snapshot,
+        removeGroup: async () => snapshot,
+        rescanProject: async () => snapshot,
+        refreshVersion: async () => snapshot,
+        listVersionSummaries: async () => fixtureHistory.versionSummaries,
+        listRevisions: async (request: { versionKey?: string }) => ({
+          items: fixtureHistory.revisions.filter(
+            (revision) =>
+              !request.versionKey ||
+              (revision.projectVersion
+                ? `version:${revision.projectVersion.trim()}`
+                : 'workspace') === request.versionKey,
+          ),
+          nextCursor: null,
+        }),
+        listActivity: async (request: { versionKey?: string }) => ({
+          items: fixtureHistory.activity.filter(
+            (entry) =>
+              !request.versionKey ||
+              (entry.projectVersion ? `version:${entry.projectVersion.trim()}` : 'workspace') ===
+                request.versionKey,
+          ),
+          nextCursor: null,
+        }),
+        compareRevisions: async () => {
+          throw new Error('no revisions');
+        },
+        clearHistory: async () => snapshot,
+        getRetention: async () => ({ revisionsPerArtifact: 50, activityPerProject: 1000 }),
+        setRetention: async () => ({ revisionsPerArtifact: 50, activityPerProject: 1000 }),
+        revealArtifact: async () => undefined,
+        revealUserData: async () => undefined,
+        getUserDataPath: async () => 'C:/Users/test/AppData/Local/openspec-desktop',
+        openExternal: async () => undefined,
+        onProjection: (next: (event: unknown) => void) => {
+          listener = next;
+          return () => {
+            listener = undefined;
+          };
+        },
+      };
+      Object.defineProperty(window, 'desktop', { configurable: true, value: desktop });
+      Object.defineProperty(window, '__updateProjectCalls', {
+        configurable: true,
+        value: updateProjectCalls,
+      });
+      Object.defineProperty(window, '__emitProjection', {
+        configurable: true,
+        value: (event: unknown) => listener?.(event),
+      });
+    },
+    {
+      snapshot: initialSnapshot,
+      history: {
+        versionSummaries: history.versionSummaries ?? defaultVersionSummaries,
+        activity: history.activity ?? [],
+        revisions: history.revisions ?? [],
       },
-      clearHistory: async () => snapshot,
-      getRetention: async () => ({ revisionsPerArtifact: 50, activityPerProject: 1000 }),
-      setRetention: async () => ({ revisionsPerArtifact: 50, activityPerProject: 1000 }),
-      revealArtifact: async () => undefined,
-      revealUserData: async () => undefined,
-      getUserDataPath: async () => 'C:/Users/test/AppData/Local/openspec-desktop',
-      openExternal: async () => undefined,
-      onProjection: (next: (event: unknown) => void) => {
-        listener = next;
-        return () => {
-          listener = undefined;
-        };
-      },
-    };
-    Object.defineProperty(window, 'desktop', { configurable: true, value: desktop });
-    Object.defineProperty(window, '__emitProjection', {
-      configurable: true,
-      value: (event: unknown) => listener?.(event),
-    });
-  }, initialSnapshot);
+    },
+  );
 }
 
 test('renders the desktop workspace and preserves long Markdown safely', async ({
@@ -242,4 +302,127 @@ test('imports an eligible Codex project from a populated workspace', async ({ pa
   await dialog.getByRole('button', { name: '导入 1 个项目' }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByText('已导入 1 个 Codex 项目')).toBeVisible();
+});
+
+test('connects Change history to versions and keeps the version menu keyboard-friendly', async ({
+  page,
+}, testInfo) => {
+  const history: HistoryFixture = {
+    versionSummaries: {
+      currentKey: 'version:v1',
+      items: [
+        {
+          key: 'version:v1',
+          label: 'v1',
+          source: 'manual',
+          isCurrent: true,
+          activityCount: 1,
+          revisionCount: 1,
+          firstSeenAt: '2026-08-07T01:00:00.000Z',
+          lastSeenAt: '2026-08-07T01:00:00.000Z',
+          changeIds: ['demo'],
+        },
+        {
+          key: 'workspace',
+          label: '当前工作区',
+          isCurrent: false,
+          activityCount: 1,
+          revisionCount: 0,
+          firstSeenAt: '2026-08-06T01:00:00.000Z',
+          lastSeenAt: '2026-08-06T01:00:00.000Z',
+          changeIds: ['demo'],
+        },
+      ],
+    },
+    activity: [
+      {
+        id: 'activity-v1',
+        projectId: 'project-1',
+        kind: 'artifact-change',
+        createdAt: '2026-08-07T01:00:00.000Z',
+        relativePath: 'openspec/changes/demo/tasks.md',
+        changeId: 'demo',
+        artifactType: 'tasks',
+        projectVersion: 'v1',
+        summary: 'v1 任务文档已更新',
+        taskDelta: { completed: 1, total: 2 },
+      },
+      {
+        id: 'activity-workspace',
+        projectId: 'project-1',
+        kind: 'project-registration',
+        createdAt: '2026-08-06T01:00:00.000Z',
+        changeId: 'demo',
+        projectVersion: '',
+        summary: '项目已加入当前工作区',
+      },
+    ],
+    revisions: [],
+  };
+
+  await installDesktopFixture(page, fixture(), history);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto('/');
+
+  await expect(page.getByText('关联版本')).toBeVisible();
+  await expect(page.getByRole('button', { name: '当前工作区', exact: true })).toBeVisible();
+
+  await page.getByRole('tab', { name: '活动' }).click();
+  const filter = page.getByRole('combobox', { name: '筛选历史版本' });
+  await expect(filter).toHaveValue('');
+  await page.getByRole('button', { name: '当前版本 v1，打开版本菜单' }).press('Enter');
+  const versionMenu = page.getByRole('menu');
+  await expect(versionMenu).toBeVisible();
+  await expect(versionMenu.getByText('手动设置')).toBeVisible();
+  const menuDuration = await versionMenu.evaluate((element) => {
+    const value = getComputedStyle(element).animationDuration;
+    return Number.parseFloat(value) * (value.endsWith('ms') ? 1 : 1000);
+  });
+  expect(menuDuration).toBeLessThanOrEqual(250);
+  await page.screenshot({ path: testInfo.outputPath('version-menu-wide.png'), fullPage: true });
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('button', { name: '当前工作区', exact: true }).click();
+  await expect(filter).toHaveValue('workspace');
+  await expect(page.getByText('项目已加入当前工作区')).toBeVisible();
+  await expect(page.getByText('v1 任务文档已更新')).toBeHidden();
+
+  await page.getByRole('button', { name: '当前版本 v1，打开版本菜单' }).click();
+  await page.getByRole('menuitem', { name: '项目与版本设置' }).click();
+  const settings = page.getByRole('dialog', { name: 'Demo project' });
+  await expect(settings).toBeVisible();
+  const dialogDuration = await settings.evaluate((element) => {
+    const value = getComputedStyle(element).animationDuration;
+    return Number.parseFloat(value) * (value.endsWith('ms') ? 1 : 1000);
+  });
+  expect(dialogDuration).toBeLessThanOrEqual(300);
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: testInfo.outputPath('version-settings.png'), fullPage: true });
+  await settings.getByRole('button', { name: '自动识别' }).click();
+  await settings.getByRole('button', { name: '手动设置' }).click();
+  const input = settings.getByPlaceholder('例如 v1.2.0');
+  await input.fill('');
+  await settings.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(settings.getByRole('alert')).toContainText('不能为空');
+  await input.fill('v2');
+  await settings.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(settings).toBeHidden();
+  await expect(page.getByText('项目设置已保存')).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as unknown as { __updateProjectCalls: unknown[] }).__updateProjectCalls,
+      ),
+    )
+    .toContainEqual(expect.objectContaining({ versionMode: 'manual', versionLabel: 'v2' }));
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.getByRole('button', { name: '当前版本 v1，打开版本菜单' }).click();
+  await expect(versionMenu).toBeVisible();
+  await expect(versionMenu).toHaveCSS('animation-name', 'none');
+  await page.keyboard.press('Escape');
+  await expect(versionMenu).toBeHidden();
+  await page.getByRole('button', { name: '当前版本 v1，打开版本菜单' }).click();
+  await page.keyboard.press('Escape');
+  await expect(versionMenu).toBeHidden();
 });

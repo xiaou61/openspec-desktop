@@ -14,6 +14,7 @@ import remarkGfm from 'remark-gfm';
 import {
   Archive,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -34,6 +35,7 @@ import {
   RefreshCw,
   Settings2,
   SlidersHorizontal,
+  Tag,
   Trash2,
   Upload,
   X,
@@ -50,6 +52,8 @@ import type {
   ProjectSnapshot,
   RevisionComparison,
   RevisionPage,
+  VersionSummary,
+  VersionSummaryList,
 } from '@shared/contracts';
 import type { DesktopApi } from '@shared/desktop-api';
 
@@ -59,10 +63,29 @@ type DetailTab = 'artifacts' | 'tasks' | 'activity' | 'revisions';
 const queryKey = ['app-snapshot'];
 const codexQueryKey = ['codex-projects'];
 
+function displayVersion(versionLabel: string): string {
+  return versionLabel.trim() || '当前工作区';
+}
+
+function versionSourceLabel(
+  source: AppSnapshot['catalog']['projects'][number]['versionSource'],
+): string {
+  return {
+    'git-tag': 'Git 标签',
+    'package-json': 'package.json',
+    manual: '手动设置',
+    workspace: '当前工作区',
+  }[source];
+}
+
+function formatDelta(value: number): string {
+  return value > 0 ? `+${value}` : String(value);
+}
+
 function emptySnapshot(): AppSnapshot {
   return {
     catalog: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       groups: [],
       projects: [],
       preferences: {
@@ -175,7 +198,7 @@ function ProgressBar({
       aria-valuenow={Math.min(completed, total)}
       aria-valuetext={`${completed} / ${total} 项任务`}
     >
-      <span className="progress-fill" style={{ width: `${ratio}%` }} />
+      <span className="progress-fill" style={{ transform: `scaleX(${ratio / 100})` }} />
     </div>
   );
 }
@@ -335,7 +358,9 @@ function ProjectRow({
       <span className={`project-dot dot-${project.watcherState}`} aria-hidden="true" />
       <span className="project-row-content">
         <strong>{project.displayName}</strong>
-        <small>{project.versionLabel || '未设置版本'}</small>
+        <small title={displayVersion(project.versionLabel)}>
+          {displayVersion(project.versionLabel)}
+        </small>
       </span>
       <ChevronRight size={14} aria-hidden="true" />
     </button>
@@ -348,12 +373,14 @@ function ChangeList({
   onModeChange,
   selectedChangeId,
   onSelect,
+  versionSummaries,
 }: {
   project: ProjectSnapshot | null;
   mode: ChangeView;
   onModeChange: (mode: ChangeView) => void;
   selectedChangeId: string | null;
   onSelect: (changeId: string) => void;
+  versionSummaries: VersionSummary[];
 }): React.JSX.Element {
   const changes =
     project?.changes.filter((change) =>
@@ -396,6 +423,7 @@ function ChangeList({
             change={change}
             selected={selectedChangeId === change.id}
             onClick={() => onSelect(change.id)}
+            versions={versionSummaries.filter((summary) => summary.changeIds.includes(change.id))}
           />
         ))}
         {changes.length === 0 && (
@@ -413,13 +441,23 @@ function ChangeRow({
   change,
   selected,
   onClick,
+  versions,
 }: {
   change: ChangeProjection;
   selected: boolean;
   onClick: () => void;
+  versions: VersionSummary[];
 }): React.JSX.Element {
   const tone =
     change.readiness === 'ready' ? 'green' : change.readiness === 'parse-error' ? 'red' : 'amber';
+  const associatedVersions = versions
+    .slice()
+    .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt));
+  const versionContext = associatedVersions[0]
+    ? associatedVersions.length > 1
+      ? `${associatedVersions[0].label} · 跨 ${associatedVersions.length} 个版本`
+      : associatedVersions[0].label
+    : '尚无版本活动';
   return (
     <button
       type="button"
@@ -434,8 +472,12 @@ function ChangeRow({
       </span>
       <span className="change-row-meta">
         <StatusBadge tone={tone}>{stageLabel(change.stage)}</StatusBadge>
-        <span>
+        <span className="change-task-count">
           {change.taskTotals.completed}/{change.taskTotals.total} 任务
+        </span>
+        <span className="change-version" title={versionContext}>
+          <Tag size={11} aria-hidden="true" />
+          <span>{versionContext}</span>
         </span>
       </span>
       <ProgressBar completed={change.taskTotals.completed} total={change.taskTotals.total} />
@@ -599,33 +641,108 @@ function TasksPane({ change }: { change: ChangeProjection }): React.JSX.Element 
   );
 }
 
+function VersionFilter({
+  summaries,
+  value,
+  onChange,
+}: {
+  summaries: VersionSummary[];
+  value: string | null;
+  onChange: (value: string | null) => void;
+}): React.JSX.Element {
+  return (
+    <label className="version-filter">
+      <span className="sr-only">筛选历史版本</span>
+      <Tag size={14} aria-hidden="true" />
+      <select value={value ?? ''} onChange={(event) => onChange(event.target.value || null)}>
+        <option value="">全部版本</option>
+        {summaries.map((summary) => (
+          <option key={summary.key} value={summary.key}>
+            {summary.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function ActivityPane({
   projectId,
   changeId,
   desktop,
+  versionSummaries,
+  versionKey,
+  onVersionChange,
 }: {
   projectId: string;
   changeId: string;
   desktop: DesktopApi | undefined;
+  versionSummaries: VersionSummary[];
+  versionKey: string | null;
+  onVersionChange: (value: string | null) => void;
 }): React.JSX.Element {
   const query = useQuery({
-    queryKey: ['activity', projectId, changeId],
-    queryFn: () => desktop!.listActivity({ projectId, changeId, limit: 50 }),
+    queryKey: ['activity', projectId, changeId, versionKey],
+    queryFn: () =>
+      desktop!.listActivity({
+        projectId,
+        changeId,
+        limit: 50,
+        ...(versionKey ? { versionKey } : {}),
+      }),
     enabled: Boolean(desktop),
   });
   const page = query.data as ActivityPage | undefined;
+  const groups = (page?.items ?? []).reduce<
+    Array<{ key: string; label: string; items: ActivityEntry[] }>
+  >((result, entry) => {
+    const key = entry.projectVersion.trim() || 'workspace';
+    const current = result.at(-1);
+    if (current?.key === key) current.items.push(entry);
+    else result.push({ key, label: displayVersion(entry.projectVersion), items: [entry] });
+    return result;
+  }, []);
   return (
     <div className="activity-pane">
+      <div className="history-toolbar">
+        <span>按记录创建时的版本分组</span>
+        <VersionFilter summaries={versionSummaries} value={versionKey} onChange={onVersionChange} />
+      </div>
       {query.isLoading ? (
         <LoadingState />
-      ) : page?.items.length ? (
-        <ol className="activity-list">
-          {page.items.map((entry) => (
-            <ActivityRow key={entry.id} entry={entry} />
+      ) : groups.length ? (
+        <div className="activity-groups">
+          {groups.map((group) => (
+            <section key={`${group.key}-${group.items[0]?.id}`} className="activity-group">
+              <header>
+                <Tag size={13} aria-hidden="true" />
+                <strong>{group.label}</strong>
+                <span>{group.items.length} 条</span>
+              </header>
+              <ol className="activity-list">
+                {group.items.map((entry) => (
+                  <ActivityRow key={entry.id} entry={entry} />
+                ))}
+              </ol>
+            </section>
           ))}
-        </ol>
+        </div>
       ) : (
-        <EmptyState icon={<Clock3 size={20} />} title="暂无活动记录" />
+        <EmptyState
+          icon={<Clock3 size={20} />}
+          title={versionKey ? '当前版本筛选下暂无活动记录' : '暂无活动记录'}
+          action={
+            versionKey ? (
+              <button
+                type="button"
+                className="command-button"
+                onClick={() => onVersionChange(null)}
+              >
+                查看全部版本
+              </button>
+            ) : undefined
+          }
+        />
       )}
     </div>
   );
@@ -637,8 +754,15 @@ function ActivityRow({ entry }: { entry: ActivityEntry }): React.JSX.Element {
       <span className="activity-marker" aria-hidden="true" />
       <div>
         <strong>{entry.summary}</strong>
-        <p>
-          {formatDate(entry.createdAt)} · {entry.projectVersion || '未设置版本'}
+        <p className="activity-meta">
+          <span>{formatDate(entry.createdAt)}</span>
+          {entry.relativePath && <span title={entry.relativePath}>{entry.relativePath}</span>}
+          {entry.taskDelta && (
+            <span>
+              任务变化：完成 {formatDelta(entry.taskDelta.completed)}，总数{' '}
+              {formatDelta(entry.taskDelta.total)}
+            </span>
+          )}
         </p>
       </div>
     </li>
@@ -649,18 +773,29 @@ function RevisionsPane({
   projectId,
   artifact,
   desktop,
+  versionSummaries,
+  versionKey,
+  onVersionChange,
 }: {
   projectId: string;
   artifact: ArtifactProjection | undefined;
   desktop: DesktopApi | undefined;
+  versionSummaries: VersionSummary[];
+  versionKey: string | null;
+  onVersionChange: (value: string | null) => void;
 }): React.JSX.Element {
   const [leftId, setLeftId] = useState<string>('');
   const [rightId, setRightId] = useState<string>('');
   const [comparison, setComparison] = useState<RevisionComparison | null>(null);
   const query = useQuery({
-    queryKey: ['revisions', projectId, artifact?.relativePath],
+    queryKey: ['revisions', projectId, artifact?.relativePath, versionKey],
     queryFn: () =>
-      desktop!.listRevisions({ projectId, relativePath: artifact!.relativePath, limit: 50 }),
+      desktop!.listRevisions({
+        projectId,
+        relativePath: artifact!.relativePath,
+        limit: 50,
+        ...(versionKey ? { versionKey } : {}),
+      }),
     enabled: Boolean(desktop && artifact),
   });
   const page = query.data as RevisionPage | undefined;
@@ -715,10 +850,28 @@ function RevisionsPane({
           比较
         </button>
       </div>
+      <div className="history-toolbar revision-toolbar">
+        <span>仅比较当前筛选范围内的修订</span>
+        <VersionFilter summaries={versionSummaries} value={versionKey} onChange={onVersionChange} />
+      </div>
       {query.isLoading ? (
         <LoadingState />
       ) : revisions.length === 0 ? (
-        <EmptyState icon={<History size={20} />} title="暂无保留修订" />
+        <EmptyState
+          icon={<History size={20} />}
+          title={versionKey ? '当前版本筛选下暂无保留修订' : '暂无保留修订'}
+          action={
+            versionKey ? (
+              <button
+                type="button"
+                className="command-button"
+                onClick={() => onVersionChange(null)}
+              >
+                查看全部版本
+              </button>
+            ) : undefined
+          }
+        />
       ) : (
         <>
           <div className="revision-grid">
@@ -727,7 +880,7 @@ function RevisionsPane({
               <select value={effectiveLeftId} onChange={(event) => setLeftId(event.target.value)}>
                 {revisions.map((revision) => (
                   <option key={revision.id} value={revision.id}>
-                    {formatDate(revision.createdAt)} · {revision.contentHash.slice(0, 8)}
+                    {formatDate(revision.createdAt)} · {displayVersion(revision.projectVersion)}
                   </option>
                 ))}
               </select>
@@ -737,7 +890,7 @@ function RevisionsPane({
               <select value={effectiveRightId} onChange={(event) => setRightId(event.target.value)}>
                 {revisions.map((revision) => (
                   <option key={revision.id} value={revision.id}>
-                    {formatDate(revision.createdAt)} · {revision.contentHash.slice(0, 8)}
+                    {formatDate(revision.createdAt)} · {displayVersion(revision.projectVersion)}
                   </option>
                 ))}
               </select>
@@ -1013,16 +1166,129 @@ function CodexImportDialog({
   );
 }
 
+function ProjectVersionMenu({
+  project,
+  summaries,
+  refreshing,
+  onRefresh,
+  onSelectVersion,
+  onOpenSettings,
+}: {
+  project: AppSnapshot['catalog']['projects'][number];
+  summaries: VersionSummary[];
+  refreshing: boolean;
+  onRefresh: () => void;
+  onSelectVersion: (versionKey: string) => void;
+  onOpenSettings: () => void;
+}): React.JSX.Element {
+  const label = displayVersion(project.versionLabel);
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          className="version-trigger"
+          aria-label={`当前版本 ${label}，打开版本菜单`}
+          title={label}
+        >
+          <Tag size={14} aria-hidden="true" />
+          <span>{label}</span>
+          <ChevronDown size={13} aria-hidden="true" />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          className="add-project-menu version-menu"
+          side="bottom"
+          align="end"
+          sideOffset={7}
+        >
+          <DropdownMenu.Label className="version-menu-heading">
+            <span>{project.versionMode === 'automatic' ? '自动识别' : '手动版本'}</span>
+            <strong>{versionSourceLabel(project.versionSource)}</strong>
+          </DropdownMenu.Label>
+          <DropdownMenu.Item
+            className="menu-item"
+            disabled={project.versionMode === 'manual' || refreshing}
+            onSelect={() => onRefresh()}
+          >
+            <RefreshCw className={refreshing ? 'spin' : ''} size={15} aria-hidden="true" />
+            <span>
+              {project.versionMode === 'manual' ? '手动版本无需刷新' : '重新识别本地版本'}
+            </span>
+          </DropdownMenu.Item>
+          {summaries.length > 0 && (
+            <>
+              <DropdownMenu.Separator className="menu-separator" />
+              <DropdownMenu.Label className="menu-label">历史关联</DropdownMenu.Label>
+              {summaries.slice(0, 8).map((summary) => (
+                <DropdownMenu.Item
+                  key={summary.key}
+                  className="menu-item version-menu-item"
+                  onSelect={() => onSelectVersion(summary.key)}
+                >
+                  <Tag size={14} aria-hidden="true" />
+                  <span>{summary.label}</span>
+                  <small>{summary.activityCount + summary.revisionCount}</small>
+                </DropdownMenu.Item>
+              ))}
+            </>
+          )}
+          <DropdownMenu.Separator className="menu-separator" />
+          <DropdownMenu.Item className="menu-item" onSelect={() => onOpenSettings()}>
+            <SlidersHorizontal size={15} aria-hidden="true" />
+            <span>项目与版本设置</span>
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+function ChangeVersionLinks({
+  versions,
+  onSelect,
+}: {
+  versions: VersionSummary[];
+  onSelect: (versionKey: string) => void;
+}): React.JSX.Element {
+  if (versions.length === 0) return <span className="change-version-empty">尚无版本活动</span>;
+  return (
+    <div className="change-version-links" aria-label="Change 关联版本">
+      <span>关联版本</span>
+      {versions
+        .slice()
+        .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
+        .map((summary) => (
+          <button
+            key={summary.key}
+            type="button"
+            className="version-chip"
+            onClick={() => onSelect(summary.key)}
+          >
+            <Tag size={11} aria-hidden="true" />
+            {summary.label}
+          </button>
+        ))}
+    </div>
+  );
+}
+
 function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.Element {
   const queryClient = useQueryClient();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedChangeId, setSelectedChangeId] = useState<string | null>(null);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
+  const [versionSelection, setVersionSelection] = useState<{
+    projectId: string | null;
+    key: string | null;
+  }>({ projectId: null, key: null });
   const [changeView, setChangeView] = useState<ChangeView>('active');
   const [detailTab, setDetailTab] = useState<DetailTab>('artifacts');
   const [mobileCatalogOpen, setMobileCatalogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [codexDialogOpen, setCodexDialogOpen] = useState(false);
+  const [versionRefreshing, setVersionRefreshing] = useState(false);
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
   const preferencesHydrated = useRef(false);
 
@@ -1068,6 +1334,7 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
       });
       void queryClient.invalidateQueries({ queryKey: ['activity', event.projectId] });
       void queryClient.invalidateQueries({ queryKey: ['revisions', event.projectId] });
+      void queryClient.invalidateQueries({ queryKey: ['version-summaries', event.projectId] });
     });
   }, [desktop, queryClient]);
 
@@ -1075,6 +1342,13 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
     snapshot.projects.find((entry) => entry.project.id === selectedProjectId) ??
     snapshot.projects[0] ??
     null;
+  const versionQuery = useQuery({
+    queryKey: ['version-summaries', project?.project.id],
+    queryFn: () => desktop!.listVersionSummaries({ projectId: project!.project.id }),
+    enabled: Boolean(desktop && project),
+    staleTime: 5_000,
+  });
+  const versionSummaries = (versionQuery.data as VersionSummaryList | undefined)?.items ?? [];
   const visibleChanges =
     project?.changes.filter((change) =>
       changeView === 'archive' ? change.archived : !change.archived,
@@ -1085,6 +1359,9 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
     ) ??
     visibleChanges[0] ??
     null;
+  const changeVersions = change
+    ? versionSummaries.filter((summary) => summary.changeIds.includes(change.id))
+    : [];
   const artifact =
     change?.artifacts.find((entry) => entry.relativePath === selectedArtifactPath) ??
     change?.artifacts.find((entry) => entry.type !== 'metadata') ??
@@ -1102,12 +1379,21 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
       .catch(() => undefined);
   }, [change?.id, changeView, desktop, project?.project.id, queryClient]);
 
+  const selectedVersionKey =
+    versionSelection.projectId === project?.project.id ? versionSelection.key : null;
+  const selectVersion = (key: string | null) => {
+    setVersionSelection({ projectId: project?.project.id ?? null, key });
+  };
+
   const run = async (action: () => Promise<unknown>, success = '已更新') => {
     try {
       const next = await action();
       if (next && typeof next === 'object' && 'catalog' in next && 'projects' in next) {
         queryClient.setQueryData(queryKey, next as AppSnapshot);
       }
+      void queryClient.invalidateQueries({ queryKey: ['activity'] });
+      void queryClient.invalidateQueries({ queryKey: ['revisions'] });
+      void queryClient.invalidateQueries({ queryKey: ['version-summaries'] });
       setNotice({ tone: 'success', text: success });
       window.setTimeout(() => setNotice(null), 2600);
     } catch (error) {
@@ -1192,6 +1478,7 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
           }}
           selectedChangeId={change?.id ?? null}
           onSelect={setSelectedChangeId}
+          versionSummaries={versionSummaries}
         />
         <main className="detail-pane" aria-label="Change 详情">
           {query.isLoading ? (
@@ -1230,8 +1517,33 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
                     <StatusBadge>{stageLabel(change.stage)}</StatusBadge>
                     <span>{formatDate(change.lastActivityAt)}</span>
                   </div>
+                  <ChangeVersionLinks
+                    versions={changeVersions}
+                    onSelect={(versionKey) => {
+                      selectVersion(versionKey);
+                      setDetailTab('activity');
+                    }}
+                  />
                 </div>
                 <div className="detail-actions">
+                  <ProjectVersionMenu
+                    project={project.project}
+                    summaries={versionSummaries}
+                    refreshing={versionRefreshing}
+                    onRefresh={() => {
+                      if (!desktop || versionRefreshing) return;
+                      setVersionRefreshing(true);
+                      void run(
+                        () => desktop.refreshVersion({ projectId: project.project.id }),
+                        '版本已刷新',
+                      ).finally(() => setVersionRefreshing(false));
+                    }}
+                    onSelectVersion={(versionKey) => {
+                      selectVersion(versionKey);
+                      setDetailTab('activity');
+                    }}
+                    onOpenSettings={() => setProjectDialogOpen(true)}
+                  />
                   <IconButton
                     label="重新扫描项目"
                     onClick={() => {
@@ -1317,6 +1629,9 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
                       projectId={project.project.id}
                       changeId={change.id}
                       desktop={desktop}
+                      versionSummaries={versionSummaries}
+                      versionKey={selectedVersionKey}
+                      onVersionChange={selectVersion}
                     />
                   )}
                 </Tabs.Content>
@@ -1326,6 +1641,9 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
                       projectId={project.project.id}
                       artifact={artifact}
                       desktop={desktop}
+                      versionSummaries={versionSummaries}
+                      versionKey={selectedVersionKey}
+                      onVersionChange={selectVersion}
                     />
                   )}
                 </Tabs.Content>
@@ -1388,55 +1706,13 @@ function ProjectDialog({
 }): React.JSX.Element | null {
   const [name, setName] = useState(project.displayName);
   const [version, setVersion] = useState(project.versionLabel);
+  const [versionMode, setVersionMode] = useState(project.versionMode);
+  const [versionError, setVersionError] = useState<string | null>(null);
   const [groupId, setGroupId] = useState(project.groupId ?? '');
   const [revisionsPerArtifact, setRevisionsPerArtifact] = useState(50);
   const [activityPerProject, setActivityPerProject] = useState(1000);
   const [storagePath, setStoragePath] = useState<string | null>(null);
-  const dialogRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const dialog = dialogRef.current;
-    if (!dialog) return undefined;
-    const previousFocus =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const getFocusable = (): HTMLElement[] =>
-      Array.from(
-        dialog.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href]',
-        ),
-      );
-    const focusables = getFocusable();
-    (focusables[0] ?? dialog).focus();
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const current = getFocusable();
-      if (current.length === 0) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = current[0]!;
-      const last = current[current.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-      previousFocus?.focus();
-    };
-  }, [onClose, open]);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!open || !desktop) return undefined;
@@ -1484,162 +1760,226 @@ function ProjectDialog({
     );
   };
   return (
-    <div
-      className="dialog-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.currentTarget === event.target) onClose();
-      }}
-    >
-      <section
-        ref={dialogRef}
-        className="settings-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-title"
-        aria-describedby="settings-description"
-        tabIndex={-1}
-      >
-        <div className="dialog-heading">
-          <div>
-            <span className="eyebrow">项目管理</span>
-            <h2 id="settings-title">{project.displayName}</h2>
-            <p id="settings-description" className="sr-only">
-              修改项目显示信息、历史保留策略和本地存储位置。
-            </p>
+    <Dialog.Root open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-backdrop" />
+        <Dialog.Content
+          className="settings-dialog"
+          aria-describedby="settings-description"
+          onOpenAutoFocus={() => {
+            returnFocusRef.current =
+              document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            returnFocusRef.current?.focus();
+          }}
+        >
+          <div className="dialog-heading">
+            <div>
+              <span className="eyebrow">项目管理</span>
+              <Dialog.Title className="dialog-title">{project.displayName}</Dialog.Title>
+              <Dialog.Description id="settings-description" className="sr-only">
+                修改项目显示信息、历史保留策略和本地存储位置。
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button type="button" className="icon-button" aria-label="关闭" title="关闭">
+                <X size={18} />
+              </button>
+            </Dialog.Close>
           </div>
-          <IconButton label="关闭" onClick={onClose}>
-            <X size={18} />
-          </IconButton>
-        </div>
-        <div className="form-stack">
-          <label>
-            显示名称
-            <input value={name} onChange={(event) => setName(event.target.value)} />
-          </label>
-          <label>
-            当前版本
-            <input
-              value={version}
-              onChange={(event) => setVersion(event.target.value)}
-              placeholder="例如 2026.08"
-            />
-          </label>
-          <label>
-            分组
-            <select value={groupId} onChange={(event) => setGroupId(event.target.value)}>
-              <option value="">未分组</option>
-              {groups.map((group) => (
-                <option key={group.id} value={group.id}>
-                  {group.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="retention-grid">
+          <div className="form-stack">
             <label>
-              每个文档保留修订
-              <input
-                type="number"
-                min="1"
-                max="500"
-                value={revisionsPerArtifact}
-                onChange={(event) => setRevisionsPerArtifact(Number(event.target.value))}
-              />
+              显示名称
+              <input value={name} onChange={(event) => setName(event.target.value)} />
             </label>
+            <div className="version-settings-block">
+              <div className="field-heading">
+                <span className="field-label">版本上下文</span>
+                <span className="field-hint">
+                  当前：{displayVersion(project.versionLabel)} ·{' '}
+                  {versionSourceLabel(project.versionSource)}
+                </span>
+              </div>
+              <div className="mini-segment version-mode-segment" role="group" aria-label="版本模式">
+                <button
+                  type="button"
+                  className={versionMode === 'automatic' ? 'is-active' : ''}
+                  aria-pressed={versionMode === 'automatic'}
+                  onClick={() => {
+                    setVersionMode('automatic');
+                    setVersionError(null);
+                  }}
+                >
+                  自动识别
+                </button>
+                <button
+                  type="button"
+                  className={versionMode === 'manual' ? 'is-active' : ''}
+                  aria-pressed={versionMode === 'manual'}
+                  onClick={() => setVersionMode('manual')}
+                >
+                  手动设置
+                </button>
+              </div>
+              {versionMode === 'manual' ? (
+                <label>
+                  手动版本标签
+                  <input
+                    value={version}
+                    onChange={(event) => {
+                      setVersion(event.target.value);
+                      setVersionError(null);
+                    }}
+                    placeholder="例如 v1.2.0"
+                    aria-invalid={Boolean(versionError)}
+                    aria-describedby={versionError ? 'version-error' : 'version-hint'}
+                  />
+                  <span id="version-hint" className="field-hint">
+                    去除首尾空白后 1-120 个字符 · {version.trim().length}/120
+                  </span>
+                  {versionError && (
+                    <span id="version-error" className="field-error" role="alert">
+                      {versionError}
+                    </span>
+                  )}
+                </label>
+              ) : (
+                <div className="version-auto-preview">
+                  <Tag size={15} aria-hidden="true" />
+                  <span>{displayVersion(project.versionLabel)}</span>
+                  <small>{versionSourceLabel(project.versionSource)}</small>
+                </div>
+              )}
+            </div>
             <label>
-              每个项目保留活动
-              <input
-                type="number"
-                min="1"
-                max="10000"
-                value={activityPerProject}
-                onChange={(event) => setActivityPerProject(Number(event.target.value))}
-              />
+              分组
+              <select value={groupId} onChange={(event) => setGroupId(event.target.value)}>
+                <option value="">未分组</option>
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))}
+              </select>
             </label>
+            <div className="retention-grid">
+              <label>
+                每个文档保留修订
+                <input
+                  type="number"
+                  min="1"
+                  max="500"
+                  value={revisionsPerArtifact}
+                  onChange={(event) => setRevisionsPerArtifact(Number(event.target.value))}
+                />
+              </label>
+              <label>
+                每个项目保留活动
+                <input
+                  type="number"
+                  min="1"
+                  max="10000"
+                  value={activityPerProject}
+                  onChange={(event) => setActivityPerProject(Number(event.target.value))}
+                />
+              </label>
+            </div>
           </div>
-        </div>
-        <div className="dialog-actions">
-          <button
-            type="button"
-            className="command-button command-primary"
-            onClick={() => {
-              if (desktop)
-                void onRun(
-                  () =>
-                    desktop.updateProject({
-                      projectId: project.id,
-                      displayName: name,
-                      versionLabel: version,
-                      groupId: groupId || null,
-                    }),
-                  '项目设置已保存',
-                );
-              onClose();
-            }}
-          >
-            <Check size={16} aria-hidden="true" />
-            保存
-          </button>
-          <button type="button" className="command-button" onClick={saveRetention}>
-            <SlidersHorizontal size={16} aria-hidden="true" />
-            保存保留策略
-          </button>
-          <button
-            type="button"
-            className="command-button"
-            onClick={() => {
-              if (desktop)
-                void onRun(
-                  () => desktop.selectRelocation({ projectId: project.id }),
-                  '项目路径已更新',
-                );
-            }}
-          >
-            <Upload size={16} aria-hidden="true" />
-            重新定位
-          </button>
-          <button
-            type="button"
-            className="command-button"
-            onClick={() => {
-              if (desktop)
-                void onRun(() => desktop.rescanProject({ projectId: project.id }), '扫描完成');
-            }}
-          >
-            <RefreshCw size={16} aria-hidden="true" />
-            重新扫描
-          </button>
-          <button type="button" className="command-button" onClick={() => void showStorage()}>
-            <FolderCog size={16} aria-hidden="true" />
-            本地存储
-          </button>
-          <button type="button" className="command-button" onClick={clearHistory}>
-            <Trash2 size={16} aria-hidden="true" />
-            清除历史
-          </button>
-        </div>
-        {storagePath && <code className="storage-path">{storagePath}</code>}
-        <div className="dialog-danger">
-          <button
-            type="button"
-            className="text-button danger-button"
-            onClick={() => {
-              if (desktop && window.confirm('只会移除本地目录登记，不会删除项目文件。继续？')) {
-                void onRun(
-                  () => desktop.unregisterProject({ projectId: project.id }),
-                  '项目已移除',
-                );
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="command-button command-primary"
+              onClick={() => {
+                const normalizedVersion = version.trim();
+                if (versionMode === 'manual' && !normalizedVersion) {
+                  setVersionError('手动版本标签不能为空');
+                  return;
+                }
+                if (versionMode === 'manual' && normalizedVersion.length > 120) {
+                  setVersionError('手动版本标签不能超过 120 个字符');
+                  return;
+                }
+                if (desktop)
+                  void onRun(
+                    () =>
+                      desktop.updateProject({
+                        projectId: project.id,
+                        displayName: name,
+                        ...(versionMode === 'manual'
+                          ? { versionLabel: normalizedVersion, versionMode: 'manual' as const }
+                          : { versionMode: 'automatic' as const }),
+                        groupId: groupId || null,
+                      }),
+                    '项目设置已保存',
+                  );
                 onClose();
-              }
-            }}
-          >
-            <Trash2 size={15} aria-hidden="true" />
-            移除项目登记
-          </button>
-        </div>
-      </section>
-    </div>
+              }}
+            >
+              <Check size={16} aria-hidden="true" />
+              保存
+            </button>
+            <button type="button" className="command-button" onClick={saveRetention}>
+              <SlidersHorizontal size={16} aria-hidden="true" />
+              保存保留策略
+            </button>
+            <button
+              type="button"
+              className="command-button"
+              onClick={() => {
+                if (desktop)
+                  void onRun(
+                    () => desktop.selectRelocation({ projectId: project.id }),
+                    '项目路径已更新',
+                  );
+              }}
+            >
+              <Upload size={16} aria-hidden="true" />
+              重新定位
+            </button>
+            <button
+              type="button"
+              className="command-button"
+              onClick={() => {
+                if (desktop)
+                  void onRun(() => desktop.rescanProject({ projectId: project.id }), '扫描完成');
+              }}
+            >
+              <RefreshCw size={16} aria-hidden="true" />
+              重新扫描
+            </button>
+            <button type="button" className="command-button" onClick={() => void showStorage()}>
+              <FolderCog size={16} aria-hidden="true" />
+              本地存储
+            </button>
+            <button type="button" className="command-button" onClick={clearHistory}>
+              <Trash2 size={16} aria-hidden="true" />
+              清除历史
+            </button>
+          </div>
+          {storagePath && <code className="storage-path">{storagePath}</code>}
+          <div className="dialog-danger">
+            <button
+              type="button"
+              className="text-button danger-button"
+              onClick={() => {
+                if (desktop && window.confirm('只会移除本地目录登记，不会删除项目文件。继续？')) {
+                  void onRun(
+                    () => desktop.unregisterProject({ projectId: project.id }),
+                    '项目已移除',
+                  );
+                  onClose();
+                }
+              }}
+            >
+              <Trash2 size={15} aria-hidden="true" />
+              移除项目登记
+            </button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
