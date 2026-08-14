@@ -37,6 +37,6 @@
 
 - [x] 6.1 执行 `git fetch origin` 并比较本地 `main` 与 `origin/main`；如远端新增提交或发生分叉则停止并先解决，不得 force push。
 - [x] 6.2 按允许清单显式暂存源码、测试、OpenSpec 记录、README、用户手册、截图和仓库卫生规则，复核 `git diff --cached --stat`、缓存完整差异与剩余 `git status --short`，确认没有生成产物或敏感内容。
-- [ ] 6.3 按可审阅的逻辑边界创建一个或少量 Conventional Commits 提交，记录每个提交 SHA，并确认提交后没有遗漏应发布的相关文件。
-- [ ] 6.4 将本地 `main` 正常推送到 `origin/main`，通过 GitHub CLI/API 核对远端 HEAD 与本地提交一致，并确认仓库 URL、README 手册入口、`docs/user-manual.md` 和全部截图可访问。
-- [ ] 6.5 汇总实际推送的提交 SHA、远端 URL、验证结果、明确排除项和任何未运行项；不归档本 Change，也不把未执行的 Release/安装包工作描述为已完成。
+- [x] 6.3 按可审阅的逻辑边界创建一个或少量 Conventional Commits 提交，记录每个提交 SHA，并确认提交后没有遗漏应发布的相关文件。
+- [x] 6.4 将本地 `main` 正常推送到 `origin/main`，通过 GitHub CLI/API 核对远端 HEAD 与本地提交一致，并确认仓库 URL、README 手册入口、`docs/user-manual.md` 和全部截图可访问。
+- [x] 6.5 汇总实际推送的提交 SHA、远端 URL、验证结果、明确排除项和任何未运行项；不归档本 Change，也不把未执行的 Release/安装包工作描述为已完成。
