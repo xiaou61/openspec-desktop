@@ -1,0 +1,237 @@
+[data-ui='refined'] .project-row,
+[data-ui='refined'] .change-row,
+[data-ui='refined'] .command-button,
+[data-ui='refined'] .text-button,
+[data-ui='refined'] .icon-button,
+[data-ui='refined'] .version-trigger,
+[data-ui='refined'] .version-chip,
+[data-ui='refined'] .segmented-control button,
+[data-ui='refined'] .mini-segment button {
+  transition:
+    border-color var(--duration-select) var(--ease-interface-out),
+    background-color var(--duration-select) var(--ease-interface-out),
+    color var(--duration-select) var(--ease-interface-out),
+    box-shadow var(--duration-select) var(--ease-interface-out),
+    transform var(--duration-press) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .project-row::before,
+[data-ui='refined'] .change-row::before {
+  transition:
+    opacity var(--duration-select) var(--ease-interface-out),
+    transform var(--duration-select) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .project-row:hover,
+[data-ui='refined'] .change-row:hover {
+  transform: none;
+}
+
+[data-ui='refined'] .project-row:active:not(:focus-visible),
+[data-ui='refined'] .change-row:active:not(:focus-visible),
+[data-ui='refined'] .command-button:active:not(:focus-visible),
+[data-ui='refined'] .text-button:active:not(:focus-visible),
+[data-ui='refined'] .icon-button:active:not(:focus-visible),
+[data-ui='refined'] .version-trigger:active:not(:focus-visible),
+[data-ui='refined'] .version-chip:active:not(:focus-visible),
+[data-ui='refined'] .segmented-control button:active:not(:focus-visible),
+[data-ui='refined'] .mini-segment button:active:not(:focus-visible) {
+  transform: scale(0.97);
+}
+
+[data-ui='refined'] .project-row:active:focus-visible,
+[data-ui='refined'] .change-row:active:focus-visible,
+[data-ui='refined'] .command-button:active:focus-visible,
+[data-ui='refined'] .text-button:active:focus-visible,
+[data-ui='refined'] .icon-button:active:focus-visible,
+[data-ui='refined'] .version-trigger:active:focus-visible,
+[data-ui='refined'] .version-chip:active:focus-visible,
+[data-ui='refined'] .segmented-control button:active:focus-visible,
+[data-ui='refined'] .mini-segment button:active:focus-visible {
+  transform: none;
+}
+
+[data-ui='refined'] .lifecycle-connector::after {
+  transition: transform var(--duration-state) var(--ease-interface-in-out);
+}
+
+[data-ui='refined'] .lifecycle-node-icon,
+[data-ui='refined'] .lifecycle-node-copy strong,
+[data-ui='refined'] .lifecycle-state-mark {
+  transition:
+    border-color var(--duration-state) var(--ease-interface-out),
+    background-color var(--duration-state) var(--ease-interface-out),
+    color var(--duration-state) var(--ease-interface-out),
+    box-shadow var(--duration-state) var(--ease-interface-out),
+    opacity var(--duration-state) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .disclosure-panel {
+  transition:
+    grid-template-rows var(--duration-disclosure) var(--ease-interface-out),
+    opacity var(--duration-state) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .disclosure-chevron {
+  transition: transform var(--duration-state) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .validation-action > svg,
+[data-ui='refined'] .validation-action > span {
+  transition:
+    opacity var(--duration-exit) var(--ease-interface-out),
+    color var(--duration-exit) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .detail-content[data-state='active'] {
+  animation: refined-content-enter 140ms var(--ease-interface-out);
+}
+
+[data-ui='refined'] .activity-list li {
+  animation: none;
+}
+
+@keyframes refined-content-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+[data-ui='refined'] .add-project-menu[data-state='open'] {
+  animation: refined-menu-enter var(--duration-exit) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .add-project-menu[data-state='closed'] {
+  animation: refined-menu-exit var(--duration-press) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .dialog-backdrop[data-state='open'] {
+  animation: refined-overlay-enter var(--duration-overlay) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .dialog-backdrop[data-state='closed'] {
+  animation: refined-overlay-exit var(--duration-exit) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .settings-dialog[data-state='open'],
+[data-ui='refined'] .codex-import-dialog[data-state='open'] {
+  animation: refined-dialog-enter var(--duration-overlay) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .settings-dialog[data-state='closed'],
+[data-ui='refined'] .codex-import-dialog[data-state='closed'] {
+  animation: refined-dialog-exit var(--duration-exit) var(--ease-interface-out);
+}
+
+@keyframes refined-menu-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes refined-menu-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-2px) scale(0.99);
+  }
+}
+
+@keyframes refined-overlay-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes refined-overlay-exit {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes refined-dialog-enter {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 8px)) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes refined-dialog-exit {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 4px)) scale(0.99);
+  }
+}
+
+[data-ui='refined'] .toast {
+  min-height: 42px;
+  padding: 9px 8px 9px 11px;
+  color: var(--state-success);
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity var(--duration-overlay) var(--ease-interface-out),
+    transform var(--duration-overlay) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .toast.is-entering {
+  opacity: 0;
+  transform: translateY(8px) scale(0.985);
+}
+
+[data-ui='refined'] .toast.is-closing {
+  opacity: 0;
+  transform: translateY(5px) scale(0.99);
+  transition-duration: var(--duration-exit);
+}
+
+[data-ui='refined'] .toast-message {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+[data-ui='refined'] .toast-close {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: currentColor;
+  opacity: 0.62;
+  transition:
+    background-color var(--duration-press) var(--ease-interface-out),
+    opacity var(--duration-press) var(--ease-interface-out);
+}
+
+[data-ui='refined'] .toast-close:hover {
+  background: rgb(24 24 27 / 6%);
+  opacity: 1;
+}

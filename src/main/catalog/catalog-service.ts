@@ -38,6 +38,11 @@ export interface RegisterProjectOptions {
   groupId?: string | null;
 }
 
+export interface CodexWorkspaceRegistrationOptions {
+  sourceRootPath: string;
+  displayName: string;
+}
+
 export class CatalogService {
   private state: CatalogState = createDefaultCatalogState();
   private initialized = false;
@@ -133,46 +138,107 @@ export class CatalogService {
     options: RegisterProjectOptions = {},
   ): Promise<ProjectRecord> {
     return this.enqueue(async () => {
-      const rootPath = normalizeProjectRoot(rootPathInput);
-      const validation = await validateOpenSpecProject(rootPath);
-      if (!validation.valid)
-        throw new CatalogValidationError(validation.reason ?? '不是有效的 OpenSpec 项目');
-      if (
-        this.state.projects.some(
-          (project) => project.rootPath.toLowerCase() === rootPath.toLowerCase(),
-        )
-      ) {
-        throw new CatalogValidationError('该项目已经注册');
-      }
-      if (options.groupId !== undefined && options.groupId !== null) this.getGroup(options.groupId);
-      const now = new Date().toISOString();
-      const versionLabel = options.versionLabel?.trim() ?? '';
-      const versionMode = options.versionMode ?? (versionLabel ? 'manual' : 'automatic');
-      if (versionMode === 'manual' && !versionLabel)
-        throw new CatalogValidationError('手动版本标签不能为空');
-      let project: ProjectRecord = {
-        id: randomUUID(),
-        rootPath,
-        displayName: options.displayName?.trim() || basename(rootPath),
-        versionLabel,
-        versionMode,
-        versionSource: versionMode === 'manual' ? 'manual' : (options.versionSource ?? 'workspace'),
-        groupId: options.groupId ?? null,
-        order: this.state.projects.length,
-        watcherEnabled: true,
-        watcherState: 'scanning',
-        available: true,
-        registeredAt: now,
-      };
-      if (options.versionResolvedAt !== undefined)
-        project.versionResolvedAt = options.versionResolvedAt;
-      if (versionMode === 'automatic') project = await this.prepareAutomaticVersion(project);
+      const project = await this.createProjectRecord(rootPathInput, options);
       this.state.projects.push(project);
       await this.store.save(this.state);
       const result = structuredClone(project);
       void Promise.resolve(this.options.startMonitoring?.(result)).catch(() => undefined);
       return result;
     });
+  }
+
+  findCodexWorkspaceGroup(sourceRootPathInput: string): ProjectGroup | undefined {
+    let sourceRootPath: string;
+    try {
+      sourceRootPath = normalizeProjectRoot(sourceRootPathInput);
+    } catch {
+      return undefined;
+    }
+    const key = sourceRootPath.toLowerCase();
+    const group = this.state.groups.find(
+      (entry) => entry.kind === 'codex-workspace' && entry.sourceRootPath.toLowerCase() === key,
+    );
+    return group ? structuredClone(group) : undefined;
+  }
+
+  async registerProjectInWorkspace(
+    rootPathInput: string,
+    workspace: CodexWorkspaceRegistrationOptions,
+  ): Promise<{ project: ProjectRecord; group: ProjectGroup }> {
+    return this.enqueue(async () => {
+      const sourceRootPath = normalizeProjectRoot(workspace.sourceRootPath);
+      let group = this.findCodexWorkspaceGroup(sourceRootPath);
+      const project = await this.createProjectRecord(rootPathInput, {
+        versionMode: 'automatic',
+        groupId: group?.id ?? null,
+      });
+      let createdGroup = false;
+      if (!group) {
+        group = {
+          id: randomUUID(),
+          name: workspace.displayName.trim() || basename(sourceRootPath),
+          order: this.state.groups.length,
+          kind: 'codex-workspace',
+          sourceRootPath,
+        };
+        createdGroup = true;
+      }
+      project.groupId = group.id;
+      if (createdGroup) this.state.groups.push(group);
+      this.state.projects.push(project);
+      try {
+        await this.store.save(this.state);
+      } catch (error) {
+        this.state.projects = this.state.projects.filter((entry) => entry.id !== project.id);
+        if (createdGroup)
+          this.state.groups = this.state.groups.filter((entry) => entry.id !== group?.id);
+        throw error;
+      }
+      const result = structuredClone(project);
+      void Promise.resolve(this.options.startMonitoring?.(result)).catch(() => undefined);
+      return { project: result, group: structuredClone(group) };
+    });
+  }
+
+  private async createProjectRecord(
+    rootPathInput: string,
+    options: RegisterProjectOptions,
+  ): Promise<ProjectRecord> {
+    const rootPath = normalizeProjectRoot(rootPathInput);
+    const validation = await validateOpenSpecProject(rootPath);
+    if (!validation.valid)
+      throw new CatalogValidationError(validation.reason ?? '不是有效的 OpenSpec 项目');
+    if (
+      this.state.projects.some(
+        (project) => project.rootPath.toLowerCase() === rootPath.toLowerCase(),
+      )
+    ) {
+      throw new CatalogValidationError('该项目已经注册');
+    }
+    if (options.groupId !== undefined && options.groupId !== null) this.getGroup(options.groupId);
+    const now = new Date().toISOString();
+    const versionLabel = options.versionLabel?.trim() ?? '';
+    const versionMode = options.versionMode ?? (versionLabel ? 'manual' : 'automatic');
+    if (versionMode === 'manual' && !versionLabel)
+      throw new CatalogValidationError('手动版本标签不能为空');
+    let project: ProjectRecord = {
+      id: randomUUID(),
+      rootPath,
+      displayName: options.displayName?.trim() || basename(rootPath),
+      versionLabel,
+      versionMode,
+      versionSource: versionMode === 'manual' ? 'manual' : (options.versionSource ?? 'workspace'),
+      groupId: options.groupId ?? null,
+      order: this.state.projects.length,
+      watcherEnabled: true,
+      watcherState: 'scanning',
+      available: true,
+      registeredAt: now,
+    };
+    if (options.versionResolvedAt !== undefined)
+      project.versionResolvedAt = options.versionResolvedAt;
+    if (versionMode === 'automatic') project = await this.prepareAutomaticVersion(project);
+    return project;
   }
 
   async updateProject(
@@ -268,6 +334,7 @@ export class CatalogService {
         id: randomUUID(),
         name,
         order: order ?? this.state.groups.length,
+        kind: 'manual',
       };
       this.state.groups.push(group);
       await this.store.save(this.state);

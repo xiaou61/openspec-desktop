@@ -238,6 +238,12 @@ export class HistoryStore {
 
   async recordActivity(entry: Omit<ActivityEntry, 'id' | 'projectId'>): Promise<ActivityEntry> {
     return this.enqueue(async () => {
+      if (entry.semanticKey) {
+        const existing = this.index.activity.find(
+          (activity) => activity.semanticKey === entry.semanticKey,
+        );
+        if (existing) return structuredClone(existing);
+      }
       const activity: ActivityEntry = { ...entry, id: randomUUID(), projectId: this.projectId };
       this.index.activity.push(activity);
       await this.prune();

@@ -1,8 +1,11 @@
 import type {
   ActivityPage,
+  ActionCenterSnapshot,
   AppSnapshot,
   CodexImportResult,
   CodexProjectList,
+  ChangeLifecycleAssessment,
+  CodexHandoff,
   ProjectionEvent,
   RevisionComparison,
   RevisionPage,
@@ -10,7 +13,10 @@ import type {
   VersionSummaryList,
 } from './contracts';
 import type {
+  ActionCenterRequest,
+  BuildCodexHandoffRequest,
   ClearHistoryRequest,
+  ChangeLifecycleRequest,
   CodexImportProjectsRequest,
   CompareRevisionsRequest,
   CreateGroupRequest,
@@ -19,6 +25,7 @@ import type {
   HistoryRevisionListRequest,
   RefreshVersionRequest,
   RegisterProjectRequest,
+  RunChangeValidationRequest,
   RelocateProjectRequest,
   SelectRelocationRequest,
   RevealArtifactRequest,
@@ -47,6 +54,12 @@ export interface DesktopApi {
   removeGroup(request: { groupId: string }): Promise<AppSnapshot>;
   rescanProject(request: { projectId: string }): Promise<AppSnapshot>;
   refreshVersion(request: RefreshVersionRequest): Promise<AppSnapshot>;
+  getChangeLifecycle(request: ChangeLifecycleRequest): Promise<ChangeLifecycleAssessment>;
+  runChangeValidation(request: RunChangeValidationRequest): Promise<ChangeLifecycleAssessment>;
+  getActionCenter(request: ActionCenterRequest): Promise<ActionCenterSnapshot>;
+  refreshActionCenter(request: ActionCenterRequest): Promise<ActionCenterSnapshot>;
+  buildCodexHandoff(request: BuildCodexHandoffRequest): Promise<CodexHandoff>;
+  copyCodexHandoff(request: BuildCodexHandoffRequest): Promise<CodexHandoff>;
   listRevisions(request: HistoryRevisionListRequest): Promise<RevisionPage>;
   listActivity(request: HistoryListRequest): Promise<ActivityPage>;
   listVersionSummaries(request: VersionSummaryListRequest): Promise<VersionSummaryList>;

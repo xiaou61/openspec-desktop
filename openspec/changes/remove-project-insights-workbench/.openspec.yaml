@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-13
+skip_specs: true
+goal: Remove the project insights and digest product surface while retaining lifecycle, validation, history, watcher, and action-center capabilities

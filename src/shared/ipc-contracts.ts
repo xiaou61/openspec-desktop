@@ -1,9 +1,12 @@
 import { z } from 'zod';
 import {
+  actionCenterActionKeySchema,
+  codexWorkspaceReferenceSchema,
   localIdSchema,
   retentionSettingsSchema,
   safeRelativePathSchema,
   scanOptionsSchema,
+  sha256FingerprintSchema,
   versionKeySchema,
   versionModeSchema,
 } from './contracts';
@@ -33,6 +36,12 @@ export const ipcChannelSchema = z.enum([
   'history:get-retention',
   'history:set-retention',
   'project:refresh-version',
+  'lifecycle:get-change',
+  'lifecycle:run-validation',
+  'action-center:get',
+  'action-center:refresh',
+  'action-center:build-handoff',
+  'action-center:copy-handoff',
   'system:reveal-artifact',
   'system:reveal-user-data',
   'system:get-user-data-path',
@@ -117,6 +126,7 @@ export const codexImportProjectsRequestSchema = z
           .object({
             rootPath: z.string().min(1).max(4096),
             displayName: z.string().min(1).max(160),
+            workspace: codexWorkspaceReferenceSchema.optional(),
           })
           .strict(),
       )
@@ -128,6 +138,34 @@ export type CodexImportProjectsRequest = z.infer<typeof codexImportProjectsReque
 
 export const scanRequestSchema = projectIdRequestSchema.merge(scanOptionsSchema);
 export type ScanRequest = z.infer<typeof scanRequestSchema>;
+
+export const changeLifecycleRequestSchema = z
+  .object({
+    projectId: localIdSchema,
+    changeId: localIdSchema,
+    archived: z.boolean(),
+  })
+  .strict();
+export type ChangeLifecycleRequest = z.infer<typeof changeLifecycleRequestSchema>;
+
+export const runChangeValidationRequestSchema = z
+  .object({
+    projectId: localIdSchema,
+    changeId: localIdSchema,
+  })
+  .strict();
+export type RunChangeValidationRequest = z.infer<typeof runChangeValidationRequestSchema>;
+
+export const actionCenterRequestSchema = z.object({ projectId: localIdSchema.optional() }).strict();
+export type ActionCenterRequest = z.infer<typeof actionCenterRequestSchema>;
+
+export const buildCodexHandoffRequestSchema = z
+  .object({
+    actionKey: actionCenterActionKeySchema,
+    evidenceFingerprint: sha256FingerprintSchema,
+  })
+  .strict();
+export type BuildCodexHandoffRequest = z.infer<typeof buildCodexHandoffRequestSchema>;
 
 export const historyListRequestSchema = z
   .object({

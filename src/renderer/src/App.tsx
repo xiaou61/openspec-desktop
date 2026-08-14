@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   QueryClient,
   QueryClientProvider,
@@ -15,6 +15,7 @@ import {
   Archive,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -28,12 +29,17 @@ import {
   GitCompareArrows,
   History,
   Laptop,
+  ListTodo,
   LoaderCircle,
   Menu,
   PanelsTopLeft,
   Plus,
   RefreshCw,
+  RotateCcw,
   Settings2,
+  ShieldCheck,
+  ShieldAlert,
+  Sparkles,
   SlidersHorizontal,
   Tag,
   Trash2,
@@ -46,22 +52,119 @@ import type {
   AppSnapshot,
   ArtifactProjection,
   ChangeProjection,
+  CodexDirectProject,
   CodexImportResult,
-  CodexProjectCandidate,
   CodexProjectList,
+  CodexWorkspaceMember,
+  CodexWorkspaceReference,
+  LifecycleNodeId,
   ProjectSnapshot,
   RevisionComparison,
   RevisionPage,
+  ValidationStatus,
   VersionSummary,
   VersionSummaryList,
 } from '@shared/contracts';
 import type { DesktopApi } from '@shared/desktop-api';
+import { CHANGE_PAGE_SIZE, sortChangesByRecentActivity } from './change-order';
+import {
+  LifecycleTrack,
+  ReadinessPane,
+  ValidationActionButton,
+  type ReadinessSection,
+} from './lifecycle-view';
+import {
+  lifecycleStagePresentation,
+  useChangeLifecycle,
+  useChangeValidation,
+  validationActionPresentation,
+} from './lifecycle-model';
+import { ActionCenterView, type ActionCenterViewScope } from './action-center-view';
+import { actionCenterQueryKey, useActionCenter } from './action-center-model';
+import {
+  codexRootKey,
+  collectAvailableCodexLeaves,
+  reconcileCodexSelection,
+  toggleWorkspaceSelection,
+  workspaceSelectionState,
+  type WorkspaceSelectionState,
+} from './codex-import-model';
 
 type ChangeView = 'active' | 'archive';
-type DetailTab = 'artifacts' | 'tasks' | 'activity' | 'revisions';
+type WorkspaceMode = 'changes' | 'actions';
+type DetailTab = 'artifacts' | 'tasks' | 'readiness' | 'activity' | 'revisions';
+type NoticeTone = 'success' | 'error';
+type NoticePhase = 'entering' | 'open' | 'closing';
+
+interface NoticeState {
+  tone: NoticeTone;
+  text: string;
+  phase: NoticePhase;
+}
 
 const queryKey = ['app-snapshot'];
 const codexQueryKey = ['codex-projects'];
+
+function useTransientNotice(): {
+  notice: NoticeState | null;
+  showNotice: (notice: Omit<NoticeState, 'phase'>, duration?: number) => void;
+  dismissNotice: () => void;
+} {
+  const [notice, setNotice] = useState<NoticeState | null>(null);
+  const phaseTimer = useRef<number | null>(null);
+  const dismissTimer = useRef<number | null>(null);
+  const exitTimer = useRef<number | null>(null);
+
+  const clearTimer = useCallback((timer: React.MutableRefObject<number | null>) => {
+    if (timer.current === null) return;
+    window.clearTimeout(timer.current);
+    timer.current = null;
+  }, []);
+
+  const dismissNotice = useCallback(() => {
+    clearTimer(phaseTimer);
+    clearTimer(dismissTimer);
+    clearTimer(exitTimer);
+    setNotice((current) => (current ? { ...current, phase: 'closing' } : null));
+    exitTimer.current = window.setTimeout(() => {
+      setNotice(null);
+      exitTimer.current = null;
+    }, 160);
+  }, [clearTimer]);
+
+  const showNotice = useCallback(
+    (next: Omit<NoticeState, 'phase'>, duration = 2600) => {
+      clearTimer(phaseTimer);
+      clearTimer(dismissTimer);
+      clearTimer(exitTimer);
+      setNotice({ ...next, phase: 'entering' });
+      phaseTimer.current = window.setTimeout(() => {
+        setNotice((current) => (current ? { ...current, phase: 'open' } : null));
+        phaseTimer.current = null;
+      }, 16);
+      dismissTimer.current = window.setTimeout(() => {
+        setNotice((current) => (current ? { ...current, phase: 'closing' } : null));
+        exitTimer.current = window.setTimeout(() => {
+          setNotice(null);
+          exitTimer.current = null;
+        }, 160);
+        dismissTimer.current = null;
+      }, duration);
+    },
+    [clearTimer],
+  );
+
+  useEffect(
+    () => () => {
+      clearTimer(phaseTimer);
+      clearTimer(dismissTimer);
+      clearTimer(exitTimer);
+    },
+    [clearTimer],
+  );
+
+  return { notice, showNotice, dismissNotice };
+}
 
 function displayVersion(versionLabel: string): string {
   return versionLabel.trim() || '当前工作区';
@@ -85,7 +188,7 @@ function formatDelta(value: number): string {
 function emptySnapshot(): AppSnapshot {
   return {
     catalog: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       groups: [],
       projects: [],
       preferences: {
@@ -111,19 +214,6 @@ function formatDate(value: string | undefined): string {
   }).format(date);
 }
 
-function stageLabel(stage: ChangeProjection['stage']): string {
-  return {
-    draft: '草稿',
-    specified: '已提案',
-    designed: '规格中',
-    planned: '已设计',
-    implementing: '实现中',
-    verifying: '验证中',
-    completed: '已完成',
-    archived: '已归档',
-  }[stage];
-}
-
 function watcherLabel(state: ProjectSnapshot['project']['watcherState']): string {
   return {
     scanning: '扫描中',
@@ -141,6 +231,83 @@ function readinessLabel(readiness: ChangeProjection['readiness']): string {
     'parse-error': '解析异常',
     unavailable: '暂不可用',
   }[readiness];
+}
+
+const reopenedReasonLabels = {
+  'tasks-added': '新增任务',
+  'tasks-unchecked': '任务取消勾选',
+  'task-set-changed': '任务集合变化',
+} as const;
+
+function isCapabilityIteration(change: ChangeProjection): boolean {
+  return change.evolution?.status === 'iteration' || change.evolution?.status === 'mixed';
+}
+
+function ChangeAwarenessBadges({ change }: { change: ChangeProjection }): React.JSX.Element {
+  return (
+    <span className="change-awareness-badges">
+      {change.workState?.phase === 'reopened' && (
+        <span className="awareness-badge awareness-reopened">
+          <RotateCcw size={11} aria-hidden="true" />
+          再次实施 · 第 {change.workState.iteration} 轮
+        </span>
+      )}
+      {isCapabilityIteration(change) && (
+        <span className="awareness-badge awareness-evolution">
+          <Sparkles size={11} aria-hidden="true" />
+          能力迭代
+        </span>
+      )}
+      {change.workState?.archiveIntegrity?.status === 'changed' && (
+        <span className="awareness-badge awareness-archive-alert">
+          <ShieldAlert size={11} aria-hidden="true" />
+          归档内容异常
+        </span>
+      )}
+    </span>
+  );
+}
+
+function ChangeAwareness({ change }: { change: ChangeProjection }): React.JSX.Element | null {
+  const reopened =
+    change.workState?.phase === 'reopened' ? change.workState.reopenedEvents.at(-1) : undefined;
+  const archiveChanged = change.workState?.archiveIntegrity?.status === 'changed';
+  if (!reopened && !isCapabilityIteration(change) && !archiveChanged) return null;
+  return (
+    <section className="change-awareness" aria-label="Change 演进证据">
+      {reopened && (
+        <div className="change-awareness-entry awareness-reopened-detail">
+          <RotateCcw size={16} aria-hidden="true" />
+          <span>
+            <strong>再次实施 · 第 {change.workState!.iteration} 轮</strong>
+            <small>
+              {formatDate(reopened.reopenedAt)} · {reopenedReasonLabels[reopened.reason]} ·{' '}
+              {reopened.before.completed}/{reopened.before.total} → {reopened.after.completed}/
+              {reopened.after.total} · {reopened.projectVersion.label || '当前工作区'}
+            </small>
+          </span>
+        </div>
+      )}
+      {isCapabilityIteration(change) && (
+        <div className="change-awareness-entry awareness-evolution-detail">
+          <Sparkles size={16} aria-hidden="true" />
+          <span>
+            <strong>能力迭代</strong>
+            <small>当前 delta 涉及既有主规格能力。</small>
+          </span>
+        </div>
+      )}
+      {archiveChanged && (
+        <div className="change-awareness-entry awareness-archive-detail" role="alert">
+          <ShieldAlert size={16} aria-hidden="true" />
+          <span>
+            <strong>归档内容异常</strong>
+            <small>归档内容在本地基线后发生变化；后续工作应创建新的 Change。</small>
+          </span>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function IconButton({
@@ -206,7 +373,10 @@ function ProgressBar({
 function ProjectSidebar({
   snapshot,
   selectedProjectId,
+  actionCount,
+  actionSelected,
   onSelect,
+  onSelectActions,
   onBrowse,
   onImportCodex,
   onCreateGroup,
@@ -215,7 +385,10 @@ function ProjectSidebar({
 }: {
   snapshot: AppSnapshot;
   selectedProjectId: string | null;
+  actionCount: number;
+  actionSelected: boolean;
   onSelect: (projectId: string) => void;
+  onSelectActions: () => void;
   onBrowse: () => void;
   onImportCodex: () => void;
   onCreateGroup: () => void;
@@ -273,13 +446,35 @@ function ProjectSidebar({
         <span className="eyebrow">项目</span>
         <span className="count-label">{snapshot.catalog.projects.length}</span>
       </div>
+      <button
+        type="button"
+        className={`action-center-entry ${actionSelected ? 'is-selected' : ''}`}
+        aria-current={actionSelected ? 'page' : undefined}
+        onClick={onSelectActions}
+      >
+        <ListTodo size={16} aria-hidden="true" />
+        <span>行动中心</span>
+        <span className="action-center-count" aria-label={`${actionCount} 个待处理行动`}>
+          {actionCount}
+        </span>
+      </button>
       <div className="project-tree">
         {grouped.map(({ group, projects }) => (
           <section key={group.id} className="tree-group" aria-labelledby={`group-${group.id}`}>
             <div className="tree-group-heading">
-              <span id={`group-${group.id}`}>
-                <Folder size={14} aria-hidden="true" />
-                {group.name}
+              <span
+                id={`group-${group.id}`}
+                title={group.kind === 'codex-workspace' ? group.sourceRootPath : undefined}
+              >
+                {group.kind === 'codex-workspace' ? (
+                  <FolderCog size={14} aria-hidden="true" />
+                ) : (
+                  <Folder size={14} aria-hidden="true" />
+                )}
+                <span className="tree-group-name">{group.name}</span>
+                {group.kind === 'codex-workspace' && (
+                  <span className="workspace-group-label">工作区</span>
+                )}
               </span>
               <span className="tree-group-actions">
                 <span className="count-label">{projects.length}</span>
@@ -369,6 +564,7 @@ function ProjectRow({
 
 function ChangeList({
   project,
+  desktop,
   mode,
   onModeChange,
   selectedChangeId,
@@ -376,22 +572,31 @@ function ChangeList({
   versionSummaries,
 }: {
   project: ProjectSnapshot | null;
+  desktop: DesktopApi | undefined;
   mode: ChangeView;
   onModeChange: (mode: ChangeView) => void;
   selectedChangeId: string | null;
   onSelect: (changeId: string) => void;
   versionSummaries: VersionSummary[];
 }): React.JSX.Element {
-  const changes =
+  const [page, setPage] = useState(1);
+  const changes = sortChangesByRecentActivity(
     project?.changes.filter((change) =>
       mode === 'archive' ? change.archived : !change.archived,
-    ) ?? [];
+    ) ?? [],
+  );
+  const pageCount = Math.max(1, Math.ceil(changes.length / CHANGE_PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const pageChanges = changes.slice(
+    (currentPage - 1) * CHANGE_PAGE_SIZE,
+    currentPage * CHANGE_PAGE_SIZE,
+  );
   return (
     <section className="change-list-pane" aria-label="Change 列表">
       <div className="pane-heading">
         <div>
           <span className="eyebrow">{project?.project.displayName ?? '工作区'}</span>
-          <h2>Changes</h2>
+          <h2>变更</h2>
         </div>
         <StatusBadge tone={project?.project.watcherState === 'watching' ? 'green' : 'amber'}>
           {project ? watcherLabel(project.project.watcherState) : '未选择'}
@@ -404,7 +609,7 @@ function ChangeList({
           className={mode === 'active' ? 'is-active' : ''}
           onClick={() => onModeChange('active')}
         >
-          进行中
+          当前变更
         </button>
         <button
           type="button"
@@ -413,14 +618,16 @@ function ChangeList({
           onClick={() => onModeChange('archive')}
         >
           <Archive size={14} aria-hidden="true" />
-          归档
+          已归档
         </button>
       </div>
       <div className="change-list" role="list">
-        {changes.map((change) => (
+        {pageChanges.map((change) => (
           <ChangeRow
             key={`${change.archived ? 'archive-' : ''}${change.id}`}
             change={change}
+            projectId={project!.project.id}
+            desktop={desktop}
             selected={selectedChangeId === change.id}
             onClick={() => onSelect(change.id)}
             versions={versionSummaries.filter((summary) => summary.changeIds.includes(change.id))}
@@ -429,27 +636,54 @@ function ChangeList({
         {changes.length === 0 && (
           <EmptyState
             icon={mode === 'archive' ? <Archive size={20} /> : <FileCode2 size={20} />}
-            title={mode === 'archive' ? '暂无归档 Change' : '暂无进行中的 Change'}
+            title={mode === 'archive' ? '暂无已归档 Change' : '暂无当前变更'}
           />
         )}
       </div>
+      {pageCount > 1 && (
+        <nav className="change-pagination" aria-label="Change 分页">
+          <IconButton
+            label="上一页"
+            disabled={currentPage === 1}
+            onClick={() => setPage(currentPage - 1)}
+            className="pagination-button"
+          >
+            <ChevronLeft size={15} />
+          </IconButton>
+          <span className="change-page-label" aria-live="polite">
+            第 {currentPage} / {pageCount} 页
+          </span>
+          <IconButton
+            label="下一页"
+            disabled={currentPage === pageCount}
+            onClick={() => setPage(currentPage + 1)}
+            className="pagination-button"
+          >
+            <ChevronRight size={15} />
+          </IconButton>
+        </nav>
+      )}
     </section>
   );
 }
 
 function ChangeRow({
   change,
+  projectId,
+  desktop,
   selected,
   onClick,
   versions,
 }: {
   change: ChangeProjection;
+  projectId: string;
+  desktop: DesktopApi | undefined;
   selected: boolean;
   onClick: () => void;
   versions: VersionSummary[];
 }): React.JSX.Element {
-  const tone =
-    change.readiness === 'ready' ? 'green' : change.readiness === 'parse-error' ? 'red' : 'amber';
+  const lifecycleQuery = useChangeLifecycle(projectId, change, desktop);
+  const stage = lifecycleStagePresentation(lifecycleQuery.data, change);
   const associatedVersions = versions
     .slice()
     .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt));
@@ -464,6 +698,7 @@ function ChangeRow({
       role="listitem"
       className={`change-row ${selected ? 'is-selected' : ''}`}
       aria-current={selected ? 'page' : undefined}
+      title={change.name}
       onClick={onClick}
     >
       <span className="change-row-top">
@@ -471,7 +706,7 @@ function ChangeRow({
         <ChevronRight size={15} aria-hidden="true" />
       </span>
       <span className="change-row-meta">
-        <StatusBadge tone={tone}>{stageLabel(change.stage)}</StatusBadge>
+        <StatusBadge tone={stage.tone}>{stage.label}</StatusBadge>
         <span className="change-task-count">
           {change.taskTotals.completed}/{change.taskTotals.total} 任务
         </span>
@@ -480,9 +715,10 @@ function ChangeRow({
           <span>{versionContext}</span>
         </span>
       </span>
+      <ChangeAwarenessBadges change={change} />
       <ProgressBar completed={change.taskTotals.completed} total={change.taskTotals.total} />
       <span className="change-row-foot">
-        <span>{readinessLabel(change.readiness)}</span>
+        <span>{stage.detail}</span>
         <span>{formatDate(change.lastActivityAt)}</span>
       </span>
     </button>
@@ -749,10 +985,20 @@ function ActivityPane({
 }
 
 function ActivityRow({ entry }: { entry: ActivityEntry }): React.JSX.Element {
+  const kindLabel = {
+    'artifact-change': '工件变化',
+    'task-progress': '任务进度',
+    'archive-integrity': '归档异常',
+    'watcher-state': '监听状态',
+    recovery: '恢复',
+    'project-registration': '项目登记',
+    'project-settings': '项目设置',
+  }[entry.kind];
   return (
-    <li>
+    <li className={`activity-kind-${entry.kind}`}>
       <span className="activity-marker" aria-hidden="true" />
       <div>
+        <span className="activity-kind-label">{kindLabel}</span>
         <strong>{entry.summary}</strong>
         <p className="activity-meta">
           <span>{formatDate(entry.createdAt)}</span>
@@ -921,17 +1167,67 @@ function LoadingState(): React.JSX.Element {
   );
 }
 
-function codexCandidateStatus(
-  candidate: CodexProjectCandidate,
-  imported: boolean,
+function directProjectStatus(
+  candidate: CodexDirectProject,
+  completed: boolean,
 ): {
   label: string;
   tone: 'green' | 'amber' | 'red' | 'neutral';
 } {
-  if (imported || candidate.status === 'already-added') return { label: '已添加', tone: 'neutral' };
+  if (completed || candidate.status === 'already-added')
+    return { label: '已添加', tone: 'neutral' };
   if (candidate.status === 'available') return { label: '可导入', tone: 'green' };
-  if (candidate.status === 'missing') return { label: '目录不可用', tone: 'red' };
-  return { label: '不是 OpenSpec 项目', tone: 'amber' };
+  if (candidate.status === 'unavailable') return { label: '目录不可读取', tone: 'red' };
+  return { label: '未发现项目结构', tone: 'amber' };
+}
+
+function workspaceMemberStatus(
+  member: CodexWorkspaceMember,
+  completed: boolean,
+): {
+  label: string;
+  tone: 'green' | 'amber' | 'red' | 'neutral';
+} {
+  if (completed || (member.kind === 'openspec-project' && member.status === 'already-added'))
+    return { label: '已添加', tone: 'neutral' };
+  if (member.kind === 'openspec-project') return { label: '可导入', tone: 'green' };
+  return { label: '尚未配置 OpenSpec', tone: 'amber' };
+}
+
+function WorkspaceCheckbox({
+  state,
+  disabled,
+  label,
+  onChange,
+}: {
+  state: WorkspaceSelectionState;
+  disabled: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+}): React.JSX.Element {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = state === 'mixed';
+  }, [state]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={state === 'all'}
+      disabled={disabled}
+      aria-label={label}
+      aria-checked={state === 'mixed' ? 'mixed' : state === 'all'}
+      onChange={(event) => onChange(event.target.checked)}
+    />
+  );
+}
+
+function truncationReasonLabel(reason: string): string {
+  if (reason === 'max-depth') return '达到扫描深度上限';
+  if (reason === 'max-directories') return '达到目录检查上限';
+  if (reason === 'max-members') return '达到成员数量上限';
+  if (reason === 'time-budget') return '达到扫描时间预算';
+  return '达到候选数量上限';
 }
 
 function CodexImportDialog({
@@ -945,9 +1241,10 @@ function CodexImportDialog({
   onOpenChange: (open: boolean) => void;
   onImported: (result: CodexImportResult) => void;
 }): React.JSX.Element {
-  const [selectedIds, setSelectedIds] = useState<Set<string> | null>(null);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string> | null>(null);
+  const [expandedWorkspaceIds, setExpandedWorkspaceIds] = useState<Set<string> | null>(null);
   const [importResult, setImportResult] = useState<CodexImportResult | null>(null);
-  const [completedRoots, setCompletedRoots] = useState<Set<string>>(() => new Set());
+  const [completedRootKeys, setCompletedRootKeys] = useState<Set<string>>(() => new Set());
   const query = useQuery({
     queryKey: codexQueryKey,
     queryFn: () => desktop!.listCodexProjects(),
@@ -955,14 +1252,19 @@ function CodexImportDialog({
     staleTime: 0,
   });
   const importMutation = useMutation({
-    mutationFn: (projects: Array<{ rootPath: string; displayName: string }>) =>
-      desktop!.importCodexProjects({ projects }),
+    mutationFn: (
+      projects: Array<{
+        rootPath: string;
+        displayName: string;
+        workspace?: CodexWorkspaceReference;
+      }>,
+    ) => desktop!.importCodexProjects({ projects }),
     onSuccess: (result) => {
       const completed = result.items
         .filter((item) => item.status !== 'failed')
-        .map((item) => item.rootPath);
-      setCompletedRoots((current) => new Set([...current, ...completed]));
-      setSelectedIds(new Set());
+        .map((item) => codexRootKey(item.rootPath));
+      setCompletedRootKeys((current) => new Set([...current, ...completed]));
+      setSelectedKeys(new Set());
       onImported(result);
       if (result.items.every((item) => item.status !== 'failed')) {
         onOpenChange(false);
@@ -973,27 +1275,63 @@ function CodexImportDialog({
   });
 
   const data = query.data as CodexProjectList | undefined;
-  const available =
-    data?.candidates.filter(
-      (candidate) => candidate.status === 'available' && !completedRoots.has(candidate.rootPath),
-    ) ?? [];
-  const effectiveSelectedIds = selectedIds ?? new Set(available.map((candidate) => candidate.id));
-  const selected = available.filter((candidate) => effectiveSelectedIds.has(candidate.id));
-  const allSelected = available.length > 0 && selected.length === available.length;
-  const toggleCandidate = (candidateId: string, checked: boolean): void => {
-    setSelectedIds((current) => {
-      const next = new Set(current ?? available.map((candidate) => candidate.id));
-      if (checked) next.add(candidateId);
-      else next.delete(candidateId);
+  const availableLeaves = useMemo(
+    () => collectAvailableCodexLeaves(data?.entries ?? [], completedRootKeys),
+    [completedRootKeys, data],
+  );
+  const workspaceIds = useMemo(
+    () =>
+      data?.entries.filter((entry) => entry.kind === 'workspace').map((entry) => entry.id) ?? [],
+    [data],
+  );
+  const effectiveSelectedKeys = useMemo(
+    () =>
+      selectedKeys === null
+        ? new Set(availableLeaves.map((candidate) => candidate.key))
+        : reconcileCodexSelection(selectedKeys, availableLeaves),
+    [availableLeaves, selectedKeys],
+  );
+  const effectiveExpandedWorkspaceIds = useMemo(() => {
+    if (expandedWorkspaceIds === null) return new Set(workspaceIds);
+    const validIds = new Set(workspaceIds);
+    return new Set([...expandedWorkspaceIds].filter((workspaceId) => validIds.has(workspaceId)));
+  }, [expandedWorkspaceIds, workspaceIds]);
+  const selected = availableLeaves.filter((candidate) => effectiveSelectedKeys.has(candidate.key));
+  const allSelected = availableLeaves.length > 0 && selected.length === availableLeaves.length;
+
+  const toggleCandidate = (candidateKey: string, checked: boolean): void => {
+    setSelectedKeys((current) => {
+      const next = new Set(current ?? availableLeaves.map((candidate) => candidate.key));
+      if (checked) next.add(candidateKey);
+      else next.delete(candidateKey);
       return next;
     });
   };
   const toggleAll = (checked: boolean): void => {
-    setSelectedIds(checked ? new Set(available.map((candidate) => candidate.id)) : new Set());
+    setSelectedKeys(
+      checked ? new Set(availableLeaves.map((candidate) => candidate.key)) : new Set(),
+    );
+  };
+  const toggleWorkspace = (workspaceId: string, checked: boolean): void => {
+    setSelectedKeys((current) =>
+      toggleWorkspaceSelection(
+        workspaceId,
+        checked,
+        availableLeaves,
+        current ?? new Set(availableLeaves.map((leaf) => leaf.key)),
+      ),
+    );
+  };
+  const toggleExpanded = (workspaceId: string): void => {
+    setExpandedWorkspaceIds((current) => {
+      const next = new Set(current ?? workspaceIds);
+      if (next.has(workspaceId)) next.delete(workspaceId);
+      else next.add(workspaceId);
+      return next;
+    });
   };
   const refresh = async (): Promise<void> => {
     setImportResult(null);
-    setSelectedIds(null);
     await query.refetch();
   };
   const submit = (): void => {
@@ -1002,11 +1340,16 @@ function CodexImportDialog({
       selected.map((candidate) => ({
         rootPath: candidate.rootPath,
         displayName: candidate.displayName,
+        ...(candidate.workspace ? { workspace: candidate.workspace } : {}),
       })),
     );
   };
   const failedItems = importResult?.items.filter((item) => item.status === 'failed') ?? [];
   const successfulItems = importResult?.items.filter((item) => item.status !== 'failed') ?? [];
+  const workspacesWithWarnings =
+    data?.entries.filter(
+      (entry) => entry.kind === 'workspace' && (entry.truncated || entry.diagnostics.length > 0),
+    ) ?? [];
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -1039,9 +1382,15 @@ function CodexImportDialog({
 
           {data && (
             <div className="codex-summary" aria-live="polite">
-              <span>{data.summary.candidateCount} 个候选</span>
+              <span>{data.summary.indexedRootCount} 个 Codex 根目录</span>
               <span className="summary-separator" aria-hidden="true" />
-              <strong>{available.length} 个可导入</strong>
+              <span>{data.summary.workspaceCount} 个工作区</span>
+              <span className="summary-separator" aria-hidden="true" />
+              <span>{data.summary.repositoryCount} 个代码仓库</span>
+              <span className="summary-separator" aria-hidden="true" />
+              <span>{data.summary.openSpecProjectCount} 个 OpenSpec 项目</span>
+              <span className="summary-separator" aria-hidden="true" />
+              <strong>{availableLeaves.length} 个可导入</strong>
               {data.summary.source === 'backup' && <StatusBadge tone="amber">备份索引</StatusBadge>}
             </div>
           )}
@@ -1049,6 +1398,14 @@ function CodexImportDialog({
             <div className="inline-alert alert-warning">
               <CircleAlert size={16} aria-hidden="true" />
               <span>{data.summary.message ?? '候选数量较多，仅显示索引中的前 500 项。'}</span>
+            </div>
+          )}
+          {workspacesWithWarnings.length > 0 && (
+            <div className="inline-alert alert-warning" role="status">
+              <CircleAlert size={16} aria-hidden="true" />
+              <span>
+                {workspacesWithWarnings.length} 个工作区存在局部扫描提示，已发现项目仍可导入。
+              </span>
             </div>
           )}
           {importMutation.isError && (
@@ -1078,12 +1435,12 @@ function CodexImportDialog({
               <input
                 type="checkbox"
                 checked={allSelected}
-                disabled={available.length === 0 || importMutation.isPending}
+                disabled={availableLeaves.length === 0 || importMutation.isPending}
                 onChange={(event) => toggleAll(event.target.checked)}
               />
               <span>全选可用项目</span>
             </label>
-            <span>{selected.length} 个已选</span>
+            <span aria-live="polite">{selected.length} 个已选</span>
           </div>
 
           <div className="codex-candidate-list" aria-label="Codex 项目候选">
@@ -1100,40 +1457,157 @@ function CodexImportDialog({
                   </button>
                 }
               />
-            ) : data?.candidates.length ? (
-              data.candidates.map((candidate) => {
-                const imported = completedRoots.has(candidate.rootPath);
-                const status = codexCandidateStatus(candidate, imported);
-                const selectable = candidate.status === 'available' && !imported;
+            ) : data?.entries.length ? (
+              data.entries.map((entry) => {
+                if (entry.kind === 'workspace') {
+                  const expanded = effectiveExpandedWorkspaceIds.has(entry.id);
+                  const selectionState = workspaceSelectionState(
+                    entry.id,
+                    availableLeaves,
+                    effectiveSelectedKeys,
+                  );
+                  const selectable = selectionState !== 'disabled' && !importMutation.isPending;
+                  return (
+                    <section
+                      key={entry.id}
+                      className="codex-workspace-entry"
+                      aria-labelledby={`codex-workspace-${entry.id}`}
+                    >
+                      <div className="codex-workspace-row" title={entry.rootPath}>
+                        <button
+                          type="button"
+                          className="codex-expand-button"
+                          aria-label={`${expanded ? '折叠' : '展开'}工作区 ${entry.displayName}`}
+                          aria-expanded={expanded}
+                          aria-controls={`codex-workspace-members-${entry.id}`}
+                          onClick={() => toggleExpanded(entry.id)}
+                        >
+                          {expanded ? (
+                            <ChevronDown size={15} aria-hidden="true" />
+                          ) : (
+                            <ChevronRight size={15} aria-hidden="true" />
+                          )}
+                        </button>
+                        <WorkspaceCheckbox
+                          state={selectionState}
+                          disabled={!selectable}
+                          label={`选择工作区 ${entry.displayName} 的可导入项目`}
+                          onChange={(checked) => toggleWorkspace(entry.id, checked)}
+                        />
+                        <span className="candidate-copy" id={`codex-workspace-${entry.id}`}>
+                          <strong>
+                            <FolderCog size={14} aria-hidden="true" />
+                            {entry.displayName}
+                          </strong>
+                          <small title={entry.rootPath}>{entry.rootPath}</small>
+                        </span>
+                        <span className="candidate-meta">
+                          <StatusBadge tone={entry.availableCount > 0 ? 'green' : 'neutral'}>
+                            {entry.availableCount > 0
+                              ? `${entry.availableCount} 个可导入`
+                              : '无可导入项目'}
+                          </StatusBadge>
+                          <small>
+                            {entry.repositoryCount} 个代码仓库 · {entry.openSpecProjectCount} 个
+                            OpenSpec 项目
+                          </small>
+                        </span>
+                      </div>
+                      {expanded && (
+                        <div
+                          id={`codex-workspace-members-${entry.id}`}
+                          className="codex-workspace-members"
+                          role="group"
+                          aria-label={`${entry.displayName} 的项目成员`}
+                        >
+                          {entry.members.map((member) => {
+                            const memberKey = codexRootKey(member.rootPath);
+                            const completed = completedRootKeys.has(memberKey);
+                            const status = workspaceMemberStatus(member, completed);
+                            const memberSelectable =
+                              member.kind === 'openspec-project' &&
+                              member.status === 'available' &&
+                              !completed;
+                            return (
+                              <label
+                                key={member.id}
+                                className={`codex-candidate codex-member ${memberSelectable ? '' : 'is-disabled'}`}
+                                title={member.rootPath}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={memberSelectable && effectiveSelectedKeys.has(memberKey)}
+                                  disabled={!memberSelectable || importMutation.isPending}
+                                  onChange={(event) =>
+                                    toggleCandidate(memberKey, event.target.checked)
+                                  }
+                                />
+                                <span className="candidate-copy">
+                                  <strong>{member.displayName}</strong>
+                                  <small title={member.rootPath}>{member.rootPath}</small>
+                                </span>
+                                <span className="candidate-meta">
+                                  <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+                                  <small>
+                                    {member.kind === 'openspec-project'
+                                      ? (member.reason ?? 'OpenSpec 项目')
+                                      : member.reason}
+                                  </small>
+                                </span>
+                              </label>
+                            );
+                          })}
+                          {(entry.truncated || entry.diagnostics.length > 0) && (
+                            <div className="codex-workspace-diagnostic" role="status">
+                              <CircleAlert size={14} aria-hidden="true" />
+                              <span>
+                                {[
+                                  ...entry.truncationReasons.map(truncationReasonLabel),
+                                  ...entry.diagnostics.map((diagnostic) => diagnostic.message),
+                                ]
+                                  .slice(0, 3)
+                                  .join('；')}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </section>
+                  );
+                }
+                const candidateKey = codexRootKey(entry.rootPath);
+                const completed = completedRootKeys.has(candidateKey);
+                const status = directProjectStatus(entry, completed);
+                const selectable = entry.status === 'available' && !completed;
                 return (
                   <label
-                    key={candidate.id}
+                    key={entry.id}
                     className={`codex-candidate ${selectable ? '' : 'is-disabled'}`}
-                    title={candidate.rootPath}
+                    title={entry.rootPath}
                   >
                     <input
                       type="checkbox"
-                      checked={selectable && effectiveSelectedIds.has(candidate.id)}
+                      checked={selectable && effectiveSelectedKeys.has(candidateKey)}
                       disabled={!selectable || importMutation.isPending}
-                      onChange={(event) => toggleCandidate(candidate.id, event.target.checked)}
+                      onChange={(event) => toggleCandidate(candidateKey, event.target.checked)}
                     />
                     <span className="candidate-copy">
-                      <strong>{candidate.displayName}</strong>
-                      <small>{candidate.rootPath}</small>
+                      <strong>{entry.displayName}</strong>
+                      <small title={entry.rootPath}>{entry.rootPath}</small>
                     </span>
                     <span className="candidate-meta">
                       <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                       <small>
-                        {candidate.lastUsedAt
-                          ? formatDate(candidate.lastUsedAt)
-                          : (candidate.reason ?? 'Codex 工作区')}
+                        {entry.lastUsedAt
+                          ? formatDate(entry.lastUsedAt)
+                          : (entry.reason ?? 'OpenSpec 项目')}
                       </small>
                     </span>
                   </label>
                 );
               })
             ) : (
-              <EmptyState icon={<Laptop size={20} />} title="未发现 Codex 项目" />
+              <EmptyState icon={<Laptop size={20} />} title="未发现 Codex 根目录" />
             )}
           </div>
 
@@ -1276,6 +1750,10 @@ function ChangeVersionLinks({
 
 function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.Element {
   const queryClient = useQueryClient();
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('changes');
+  const [actionScope, setActionScope] = useState<ActionCenterViewScope>('all');
+  const [selectedActionKey, setSelectedActionKey] = useState<string | null>(null);
+  const [actionRefreshing, setActionRefreshing] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedChangeId, setSelectedChangeId] = useState<string | null>(null);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
@@ -1285,12 +1763,20 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
   }>({ projectId: null, key: null });
   const [changeView, setChangeView] = useState<ChangeView>('active');
   const [detailTab, setDetailTab] = useState<DetailTab>('artifacts');
+  const [readinessFocus, setReadinessFocus] = useState<{
+    section: ReadinessSection | null;
+    nonce: number;
+  }>({ section: null, nonce: 0 });
+  const [artifactFocus, setArtifactFocus] = useState<{ path: string; nonce: number } | null>(null);
   const [mobileCatalogOpen, setMobileCatalogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [codexDialogOpen, setCodexDialogOpen] = useState(false);
   const [versionRefreshing, setVersionRefreshing] = useState(false);
-  const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  const { notice, showNotice, dismissNotice } = useTransientNotice();
   const preferencesHydrated = useRef(false);
+  const handledArtifactFocus = useRef(0);
+  const mobileCatalogTriggerRef = useRef<HTMLButtonElement>(null);
+  const catalogLayerRef = useRef<HTMLDivElement>(null);
 
   const query = useQuery({
     queryKey,
@@ -1298,6 +1784,7 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
     staleTime: Infinity,
   });
   const snapshot = query.data ?? emptySnapshot();
+  const allActionQuery = useActionCenter(desktop);
   useEffect(() => {
     if (!query.isSuccess || preferencesHydrated.current) return;
     const preferences = snapshot.catalog.preferences;
@@ -1314,33 +1801,71 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
   useEffect(() => {
     if (!desktop) return undefined;
     return desktop.onProjection((event) => {
-      if (!event.snapshot) {
-        void queryClient.invalidateQueries({ queryKey });
-        return;
+      const domains = new Set(
+        event.domains ?? [
+          'snapshot',
+          'history',
+          'lifecycle',
+          'action-center',
+        ],
+      );
+      const affectedChanges = new Set(event.changeIds);
+      const invalidateChangeDomain = (domain: 'change-lifecycle') => {
+        const scopedKey = [domain, event.projectId];
+        if (affectedChanges.size === 0) {
+          return queryClient.invalidateQueries({ queryKey: scopedKey });
+        }
+        return queryClient.invalidateQueries({
+          queryKey: scopedKey,
+          predicate: (query) => affectedChanges.has(String(query.queryKey[3] ?? '')),
+        });
+      };
+      if (domains.has('lifecycle')) void invalidateChangeDomain('change-lifecycle');
+      if (domains.has('action-center')) {
+        void queryClient.invalidateQueries({ queryKey: actionCenterQueryKey(), exact: true });
+        void queryClient.invalidateQueries({
+          queryKey: actionCenterQueryKey(event.projectId),
+          exact: true,
+        });
       }
-      queryClient.setQueryData<AppSnapshot>(queryKey, (current) => {
-        if (!current) return current;
-        const projects = current.projects.map((entry) =>
-          entry.project.id === event.projectId ? event.snapshot! : entry,
-        );
-        const catalogProjects = current.catalog.projects.map((entry) =>
-          entry.id === event.projectId ? event.snapshot!.project : entry,
-        );
-        return {
-          ...current,
-          catalog: { ...current.catalog, projects: catalogProjects },
-          projects,
-        };
-      });
-      void queryClient.invalidateQueries({ queryKey: ['activity', event.projectId] });
-      void queryClient.invalidateQueries({ queryKey: ['revisions', event.projectId] });
-      void queryClient.invalidateQueries({ queryKey: ['version-summaries', event.projectId] });
+      if (domains.has('snapshot')) {
+        if (!event.snapshot) {
+          void queryClient.invalidateQueries({ queryKey });
+        } else {
+          queryClient.setQueryData<AppSnapshot>(queryKey, (current) => {
+            if (!current) return current;
+            const projects = current.projects.map((entry) =>
+              entry.project.id === event.projectId ? event.snapshot! : entry,
+            );
+            const catalogProjects = current.catalog.projects.map((entry) =>
+              entry.id === event.projectId ? event.snapshot!.project : entry,
+            );
+            return {
+              ...current,
+              catalog: { ...current.catalog, projects: catalogProjects },
+              projects,
+            };
+          });
+        }
+      }
+      if (domains.has('history')) {
+        void queryClient.invalidateQueries({ queryKey: ['activity', event.projectId] });
+        void queryClient.invalidateQueries({ queryKey: ['revisions', event.projectId] });
+        void queryClient.invalidateQueries({ queryKey: ['version-summaries', event.projectId] });
+      }
     });
   }, [desktop, queryClient]);
 
   const project =
     snapshot.projects.find((entry) => entry.project.id === selectedProjectId) ??
     snapshot.projects[0] ??
+    null;
+  const effectiveActionScope = actionScope === 'project' && !project ? 'all' : actionScope;
+  const actionProjectId = effectiveActionScope === 'project' ? project?.project.id : undefined;
+  const actionQuery = useActionCenter(desktop, actionProjectId);
+  const selectedAction =
+    actionQuery.data?.items.find((item) => item.actionKey === selectedActionKey) ??
+    actionQuery.data?.items[0] ??
     null;
   const versionQuery = useQuery({
     queryKey: ['version-summaries', project?.project.id],
@@ -1349,10 +1874,11 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
     staleTime: 5_000,
   });
   const versionSummaries = (versionQuery.data as VersionSummaryList | undefined)?.items ?? [];
-  const visibleChanges =
+  const visibleChanges = sortChangesByRecentActivity(
     project?.changes.filter((change) =>
       changeView === 'archive' ? change.archived : !change.archived,
-    ) ?? [];
+    ) ?? [],
+  );
   const change =
     project?.changes.find(
       (entry) => entry.id === selectedChangeId && entry.archived === (changeView === 'archive'),
@@ -1366,6 +1892,32 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
     change?.artifacts.find((entry) => entry.relativePath === selectedArtifactPath) ??
     change?.artifacts.find((entry) => entry.type !== 'metadata') ??
     change?.artifacts[0];
+  const lifecycleQuery = useChangeLifecycle(project?.project.id ?? null, change, desktop);
+  const validationMutation = useChangeValidation(
+    project?.project.id ?? null,
+    change,
+    desktop,
+  );
+  const validationStatus: ValidationStatus =
+    change && !change.archived && validationMutation.isPending
+      ? 'running'
+      : (lifecycleQuery.data?.validation.status ?? 'not-run');
+  const lifecycleStage = change
+    ? lifecycleStagePresentation(lifecycleQuery.data, change, validationStatus)
+    : null;
+  const validationAction = validationActionPresentation({
+    status: validationStatus,
+    archived: change?.archived ?? false,
+  });
+  const validationIsRunning = Boolean(
+    change && !change.archived && validationStatus === 'running',
+  );
+  const validationCanRun = Boolean(
+    change &&
+      !change.archived &&
+      desktop &&
+      typeof desktop.runChangeValidation === 'function',
+  );
 
   useEffect(() => {
     if (!desktop || !preferencesHydrated.current) return;
@@ -1394,12 +1946,34 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
       void queryClient.invalidateQueries({ queryKey: ['activity'] });
       void queryClient.invalidateQueries({ queryKey: ['revisions'] });
       void queryClient.invalidateQueries({ queryKey: ['version-summaries'] });
-      setNotice({ tone: 'success', text: success });
-      window.setTimeout(() => setNotice(null), 2600);
+      void queryClient.invalidateQueries({ queryKey: ['change-lifecycle'] });
+      void queryClient.invalidateQueries({ queryKey: ['action-center'] });
+      showNotice({ tone: 'success', text: success });
+      return true;
     } catch (error) {
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '操作失败' });
+      showNotice(
+        { tone: 'error', text: error instanceof Error ? error.message : '操作失败' },
+        4200,
+      );
+      return false;
     }
   };
+
+  const closeMobileCatalog = useCallback((restoreFocus = true) => {
+    setMobileCatalogOpen(false);
+    if (restoreFocus) {
+      window.setTimeout(() => mobileCatalogTriggerRef.current?.focus(), 0);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!mobileCatalogOpen) return;
+    window.setTimeout(() => {
+      catalogLayerRef.current
+        ?.querySelector<HTMLButtonElement>('.sidebar button:not(:disabled)')
+        ?.focus();
+    }, 0);
+  }, [mobileCatalogOpen]);
 
   const browseProject = () => {
     if (desktop) void run(() => desktop.selectProject(), '项目已加入');
@@ -1416,16 +1990,18 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
       }
       const importedCount = result.items.filter((item) => item.status !== 'failed').length;
       const failedCount = result.items.length - importedCount;
-      setNotice({
-        tone: failedCount > 0 ? 'error' : 'success',
-        text:
-          failedCount > 0
-            ? `已导入 ${importedCount} 个，${failedCount} 个失败`
-            : `已导入 ${importedCount} 个 Codex 项目`,
-      });
-      window.setTimeout(() => setNotice(null), 3200);
+      showNotice(
+        {
+          tone: failedCount > 0 ? 'error' : 'success',
+          text:
+            failedCount > 0
+              ? `已导入 ${importedCount} 个，${failedCount} 个失败`
+              : `已导入 ${importedCount} 个 Codex 项目`,
+        },
+        failedCount > 0 ? 4200 : 3200,
+      );
     },
-    [queryClient],
+    [queryClient, showNotice],
   );
   const createGroup = () => {
     const name = window.prompt('分组名称');
@@ -1437,24 +2013,145 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
   };
   const closeProjectDialog = useCallback(() => setProjectDialogOpen(false), []);
 
+  const navigateToArtifact = (requestedPath: string) => {
+    const normalized = requestedPath.replaceAll('\\', '/').replace(/^\.\//, '');
+    const target = change?.artifacts.find((entry) => {
+      const relative = entry.relativePath.replaceAll('\\', '/');
+      const source = entry.sourcePath.replaceAll('\\', '/');
+      return (
+        normalized === relative || normalized === source || normalized === `openspec/${relative}`
+      );
+    });
+    if (!target || target.type === 'metadata') return;
+    setSelectedArtifactPath(target.relativePath);
+    setArtifactFocus((current) => ({
+      path: target.relativePath,
+      nonce: (current?.nonce ?? 0) + 1,
+    }));
+    setDetailTab('artifacts');
+  };
+
+  const selectLifecycleNode = (nodeId: LifecycleNodeId) => {
+    const artifactTypeByNode: Partial<Record<LifecycleNodeId, ArtifactProjection['type']>> = {
+      proposal: 'proposal',
+      specs: 'spec',
+      design: 'design',
+      tasks: 'tasks',
+    };
+    const artifactType = artifactTypeByNode[nodeId];
+    if (artifactType) {
+      const target = change?.artifacts.find((entry) => entry.type === artifactType);
+      if (target) navigateToArtifact(target.relativePath);
+      else setDetailTab('artifacts');
+      return;
+    }
+    const section: ReadinessSection = nodeId === 'validation' ? 'validation' : 'archive';
+    setReadinessFocus((current) => ({ section, nonce: current.nonce + 1 }));
+    setDetailTab('readiness');
+  };
+
+  const refreshActionCenter = async (): Promise<void> => {
+    if (!desktop || actionRefreshing) return;
+    setActionRefreshing(true);
+    try {
+      const request = actionProjectId ? { projectId: actionProjectId } : {};
+      const next = await desktop.refreshActionCenter(request);
+      queryClient.setQueryData(actionCenterQueryKey(actionProjectId), next);
+      if (actionProjectId) {
+        void queryClient.invalidateQueries({ queryKey: actionCenterQueryKey() });
+      }
+    } catch (error) {
+      showNotice(
+        { tone: 'error', text: error instanceof Error ? error.message : '行动中心刷新失败' },
+        4200,
+      );
+    } finally {
+      setActionRefreshing(false);
+    }
+  };
+
+  const openAction = (projectId: string, changeId?: string, archived = false): void => {
+    setSelectedProjectId(projectId);
+    setSelectedChangeId(changeId ?? null);
+    setChangeView(archived ? 'archive' : 'active');
+    if (selectedAction?.targetNode === 'tasks') setDetailTab('tasks');
+    else if (
+      selectedAction?.targetNode === 'validation' ||
+      selectedAction?.targetNode === 'archive'
+    ) {
+      setDetailTab('readiness');
+    } else {
+      setDetailTab('artifacts');
+    }
+    setWorkspaceMode('changes');
+    if (mobileCatalogOpen) closeMobileCatalog();
+  };
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-ui="refined">
       <header className="mobile-topbar">
-        <IconButton label="打开项目目录" onClick={() => setMobileCatalogOpen(true)}>
+        <button
+          ref={mobileCatalogTriggerRef}
+          type="button"
+          className="icon-button"
+          aria-label="打开项目目录"
+          title="打开项目目录"
+          aria-controls="project-catalog"
+          aria-expanded={mobileCatalogOpen}
+          onClick={() => setMobileCatalogOpen(true)}
+        >
           <Menu size={19} />
-        </IconButton>
+        </button>
         <span className="mobile-title">OpenSpec Desktop</span>
         <span className="live-dot" aria-label="本地应用" />
       </header>
       <div className="workspace-grid">
-        <div className={`catalog-layer ${mobileCatalogOpen ? 'is-open' : ''}`}>
+        <div
+          ref={catalogLayerRef}
+          id="project-catalog"
+          className={`catalog-layer ${mobileCatalogOpen ? 'is-open' : ''}`}
+          role={mobileCatalogOpen ? 'dialog' : undefined}
+          aria-label={mobileCatalogOpen ? '项目目录' : undefined}
+          aria-modal={mobileCatalogOpen || undefined}
+          onKeyDown={(event) => {
+            if (!mobileCatalogOpen) return;
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeMobileCatalog();
+              return;
+            }
+            if (event.key === 'Tab') {
+              const controls = Array.from(
+                catalogLayerRef.current?.querySelectorAll<HTMLButtonElement>(
+                  '.sidebar button:not(:disabled)',
+                ) ?? [],
+              );
+              const first = controls[0];
+              const last = controls.at(-1);
+              if (event.shiftKey && first && document.activeElement === first) {
+                event.preventDefault();
+                last?.focus();
+              } else if (!event.shiftKey && last && document.activeElement === last) {
+                event.preventDefault();
+                first?.focus();
+              }
+            }
+          }}
+        >
           <ProjectSidebar
             snapshot={snapshot}
             selectedProjectId={project?.project.id ?? null}
+            actionCount={allActionQuery.data?.summary.actionCount ?? 0}
+            actionSelected={workspaceMode === 'actions'}
             onSelect={(id) => {
               setSelectedProjectId(id);
               setSelectedChangeId(null);
-              setMobileCatalogOpen(false);
+              setWorkspaceMode('changes');
+              if (mobileCatalogOpen) closeMobileCatalog();
+            }}
+            onSelectActions={() => {
+              setWorkspaceMode('actions');
+              if (mobileCatalogOpen) closeMobileCatalog();
             }}
             onBrowse={browseProject}
             onImportCodex={() => setCodexDialogOpen(true)}
@@ -1466,195 +2163,265 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
             type="button"
             className="catalog-scrim"
             aria-label="关闭项目目录"
-            onClick={() => setMobileCatalogOpen(false)}
+            onClick={() => closeMobileCatalog()}
           />
         </div>
-        <ChangeList
-          project={project}
-          mode={changeView}
-          onModeChange={(mode) => {
-            setChangeView(mode);
-            setSelectedChangeId(null);
-          }}
-          selectedChangeId={change?.id ?? null}
-          onSelect={setSelectedChangeId}
-          versionSummaries={versionSummaries}
-        />
-        <main className="detail-pane" aria-label="Change 详情">
-          {query.isLoading ? (
-            <LoadingState />
-          ) : !project || !change ? (
-            <EmptyState
-              icon={<PanelsTopLeft size={22} />}
-              title={project ? '选择一个 Change 开始查看' : '选择一个项目开始查看'}
-              action={
-                !project ? (
-                  <button type="button" className="command-button" onClick={browseProject}>
-                    <FolderPlus size={16} aria-hidden="true" />
-                    添加项目
-                  </button>
-                ) : undefined
-              }
+        {workspaceMode === 'actions' ? (
+          <ActionCenterView
+            snapshot={actionQuery.data}
+            loading={actionQuery.isLoading}
+            fetching={actionQuery.isFetching || actionRefreshing}
+            error={actionQuery.error}
+            scope={effectiveActionScope}
+            currentProjectName={project?.project.displayName}
+            selectedActionKey={selectedAction?.actionKey ?? null}
+            desktop={desktop}
+            onScopeChange={setActionScope}
+            onSelectAction={setSelectedActionKey}
+            onRefresh={() => void refreshActionCenter()}
+            onOpenAction={openAction}
+          />
+        ) : (
+          <>
+            <ChangeList
+              key={`${project?.project.id ?? 'no-project'}:${changeView}`}
+              project={project}
+              desktop={desktop}
+              mode={changeView}
+              onModeChange={(mode) => {
+                setChangeView(mode);
+                setSelectedChangeId(null);
+              }}
+              selectedChangeId={change?.id ?? null}
+              onSelect={setSelectedChangeId}
+              versionSummaries={versionSummaries}
             />
-          ) : (
-            <>
-              <div className="detail-heading">
-                <div className="detail-heading-copy">
-                  <span className="eyebrow">{change.archived ? '归档 Change' : '当前 Change'}</span>
-                  <h1>{change.name}</h1>
-                  <div className="detail-meta">
-                    <StatusBadge
-                      tone={
-                        change.readiness === 'ready'
-                          ? 'green'
-                          : change.readiness === 'parse-error'
-                            ? 'red'
-                            : 'amber'
-                      }
-                    >
-                      {readinessLabel(change.readiness)}
-                    </StatusBadge>
-                    <StatusBadge>{stageLabel(change.stage)}</StatusBadge>
-                    <span>{formatDate(change.lastActivityAt)}</span>
+            <main className="detail-pane" aria-label="Change 详情">
+              {query.isLoading ? (
+                <LoadingState />
+              ) : !project || !change ? (
+                <EmptyState
+                  icon={<PanelsTopLeft size={22} />}
+                  title={project ? '选择一个 Change 开始查看' : '选择一个项目开始查看'}
+                  action={
+                    !project ? (
+                      <button type="button" className="command-button" onClick={browseProject}>
+                        <FolderPlus size={16} aria-hidden="true" />
+                        添加项目
+                      </button>
+                    ) : undefined
+                  }
+                />
+              ) : (
+                <>
+                  <div className="detail-heading">
+                    <div className="detail-heading-copy">
+                      <span className="eyebrow">{change.archived ? '已归档' : '当前变更'}</span>
+                      <h1>{change.name}</h1>
+                      <div className="detail-meta">
+                        {lifecycleStage && (
+                          <StatusBadge tone={lifecycleStage.tone}>
+                            {lifecycleStage.label}
+                          </StatusBadge>
+                        )}
+                        <ChangeAwarenessBadges change={change} />
+                        {change.readiness !== 'ready' && (
+                          <span className="detail-structure-warning">
+                            <CircleAlert size={12} aria-hidden="true" />
+                            {readinessLabel(change.readiness)}
+                          </span>
+                        )}
+                        <span className="detail-timestamp">
+                          <Clock3 size={12} aria-hidden="true" />
+                          {formatDate(change.lastActivityAt)}
+                        </span>
+                      </div>
+                      <ChangeVersionLinks
+                        versions={changeVersions}
+                        onSelect={(versionKey) => {
+                          selectVersion(versionKey);
+                          setDetailTab('activity');
+                        }}
+                      />
+                    </div>
+                    <div className="detail-actions">
+                      {validationAction.visible && (
+                        <ValidationActionButton
+                          changeName={change.name}
+                          presentation={validationAction}
+                          canRun={validationCanRun}
+                          running={validationIsRunning}
+                          error={validationMutation.error}
+                          onActivate={() => validationMutation.mutate()}
+                        />
+                      )}
+                      <ProjectVersionMenu
+                        project={project.project}
+                        summaries={versionSummaries}
+                        refreshing={versionRefreshing}
+                        onRefresh={() => {
+                          if (!desktop || versionRefreshing) return;
+                          setVersionRefreshing(true);
+                          void run(
+                            () => desktop.refreshVersion({ projectId: project.project.id }),
+                            '版本已刷新',
+                          ).finally(() => setVersionRefreshing(false));
+                        }}
+                        onSelectVersion={(versionKey) => {
+                          selectVersion(versionKey);
+                          setDetailTab('activity');
+                        }}
+                        onOpenSettings={() => setProjectDialogOpen(true)}
+                      />
+                      <IconButton
+                        label="重新扫描项目"
+                        onClick={() => {
+                          if (desktop && project)
+                            void run(
+                              () => desktop.rescanProject({ projectId: project.project.id }),
+                              '项目已重新扫描',
+                            );
+                        }}
+                      >
+                        <RefreshCw size={17} />
+                      </IconButton>
+                      <IconButton label="项目设置" onClick={() => setProjectDialogOpen(true)}>
+                        <SlidersHorizontal size={17} />
+                      </IconButton>
+                    </div>
                   </div>
-                  <ChangeVersionLinks
-                    versions={changeVersions}
-                    onSelect={(versionKey) => {
-                      selectVersion(versionKey);
-                      setDetailTab('activity');
-                    }}
+                  <ChangeAwareness change={change} />
+                  <LifecycleTrack
+                    assessment={lifecycleQuery.data}
+                    loading={lifecycleQuery.isLoading}
+                    error={lifecycleQuery.error}
+                    onSelect={selectLifecycleNode}
                   />
-                </div>
-                <div className="detail-actions">
-                  <ProjectVersionMenu
-                    project={project.project}
-                    summaries={versionSummaries}
-                    refreshing={versionRefreshing}
-                    onRefresh={() => {
-                      if (!desktop || versionRefreshing) return;
-                      setVersionRefreshing(true);
-                      void run(
-                        () => desktop.refreshVersion({ projectId: project.project.id }),
-                        '版本已刷新',
-                      ).finally(() => setVersionRefreshing(false));
-                    }}
-                    onSelectVersion={(versionKey) => {
-                      selectVersion(versionKey);
-                      setDetailTab('activity');
-                    }}
-                    onOpenSettings={() => setProjectDialogOpen(true)}
-                  />
-                  <IconButton
-                    label="重新扫描项目"
-                    onClick={() => {
-                      if (desktop && project)
-                        void run(
-                          () => desktop.rescanProject({ projectId: project.project.id }),
-                          '扫描完成',
-                        );
-                    }}
+                  <Tabs.Root
+                    value={detailTab}
+                    onValueChange={(value) => setDetailTab(value as DetailTab)}
+                    className="detail-tabs"
                   >
-                    <RefreshCw size={17} />
-                  </IconButton>
-                  <IconButton label="项目设置" onClick={() => setProjectDialogOpen(true)}>
-                    <SlidersHorizontal size={17} />
-                  </IconButton>
-                </div>
-              </div>
-              <Tabs.Root
-                value={detailTab}
-                onValueChange={(value) => setDetailTab(value as DetailTab)}
-                className="detail-tabs"
-              >
-                <Tabs.List className="detail-tab-list" aria-label="Change 详情视图">
-                  <Tabs.Trigger value="artifacts" className="detail-tab">
-                    <FileText size={15} aria-hidden="true" />
-                    文档
-                  </Tabs.Trigger>
-                  <Tabs.Trigger value="tasks" className="detail-tab">
-                    <Check size={15} aria-hidden="true" />
-                    任务
-                  </Tabs.Trigger>
-                  <Tabs.Trigger value="activity" className="detail-tab">
-                    <Clock3 size={15} aria-hidden="true" />
-                    活动
-                  </Tabs.Trigger>
-                  <Tabs.Trigger value="revisions" className="detail-tab">
-                    <History size={15} aria-hidden="true" />
-                    修订
-                  </Tabs.Trigger>
-                </Tabs.List>
-                <Tabs.Content value="artifacts" className="detail-content">
-                  <div className="artifact-tabs" role="tablist" aria-label="Change 文档">
-                    {change.artifacts
-                      .filter((entry) => entry.type !== 'metadata')
-                      .map((entry) => (
-                        <button
-                          key={entry.relativePath}
-                          type="button"
-                          role="tab"
-                          aria-selected={artifact?.relativePath === entry.relativePath}
-                          className={
-                            artifact?.relativePath === entry.relativePath ? 'is-selected' : ''
-                          }
-                          onClick={() => setSelectedArtifactPath(entry.relativePath)}
-                        >
-                          <FileText size={14} aria-hidden="true" />
-                          {entry.relativePath.split('/').at(-1)}
-                        </button>
-                      ))}
-                    {change.missingArtifacts.length > 0 && (
-                      <span className="missing-note">
-                        <CircleAlert size={14} aria-hidden="true" />
-                        缺少：{change.missingArtifacts.join('、')}
-                      </span>
-                    )}
-                  </div>
-                  {artifact ? (
-                    <MarkdownPane
-                      projectId={project.project.id}
-                      artifact={artifact}
-                      desktop={desktop}
-                    />
-                  ) : (
-                    <EmptyState icon={<FileText size={20} />} title="暂无文档" />
-                  )}
-                </Tabs.Content>
-                <Tabs.Content value="tasks" className="detail-content">
-                  <TasksPane change={change} />
-                </Tabs.Content>
-                <Tabs.Content value="activity" className="detail-content">
-                  {project && (
-                    <ActivityPane
-                      projectId={project.project.id}
-                      changeId={change.id}
-                      desktop={desktop}
-                      versionSummaries={versionSummaries}
-                      versionKey={selectedVersionKey}
-                      onVersionChange={selectVersion}
-                    />
-                  )}
-                </Tabs.Content>
-                <Tabs.Content value="revisions" className="detail-content">
-                  {project && (
-                    <RevisionsPane
-                      projectId={project.project.id}
-                      artifact={artifact}
-                      desktop={desktop}
-                      versionSummaries={versionSummaries}
-                      versionKey={selectedVersionKey}
-                      onVersionChange={selectVersion}
-                    />
-                  )}
-                </Tabs.Content>
-              </Tabs.Root>
-            </>
-          )}
-        </main>
+                    <Tabs.List className="detail-tab-list" aria-label="Change 详情视图">
+                      <Tabs.Trigger value="artifacts" className="detail-tab">
+                        <FileText size={15} aria-hidden="true" />
+                        文档
+                      </Tabs.Trigger>
+                      <Tabs.Trigger value="tasks" className="detail-tab">
+                        <Check size={15} aria-hidden="true" />
+                        任务
+                      </Tabs.Trigger>
+                      <Tabs.Trigger value="readiness" className="detail-tab">
+                        <ShieldCheck size={15} aria-hidden="true" />
+                        就绪
+                      </Tabs.Trigger>
+                      <Tabs.Trigger value="activity" className="detail-tab">
+                        <Clock3 size={15} aria-hidden="true" />
+                        活动
+                      </Tabs.Trigger>
+                      <Tabs.Trigger value="revisions" className="detail-tab">
+                        <History size={15} aria-hidden="true" />
+                        修订
+                      </Tabs.Trigger>
+                    </Tabs.List>
+                    <Tabs.Content value="artifacts" className="detail-content">
+                      <div className="artifact-tabs" role="tablist" aria-label="Change 文档">
+                        {change.artifacts
+                          .filter((entry) => entry.type !== 'metadata')
+                          .map((entry) => (
+                            <button
+                              key={entry.relativePath}
+                              type="button"
+                              role="tab"
+                              aria-selected={artifact?.relativePath === entry.relativePath}
+                              data-artifact-path={entry.relativePath}
+                              className={
+                                artifact?.relativePath === entry.relativePath ? 'is-selected' : ''
+                              }
+                              ref={(node) => {
+                                if (node) {
+                                  if (
+                                    artifactFocus?.path === entry.relativePath &&
+                                    handledArtifactFocus.current !== artifactFocus.nonce
+                                  ) {
+                                    handledArtifactFocus.current = artifactFocus.nonce;
+                                    node.focus();
+                                  }
+                                }
+                              }}
+                              onClick={() => setSelectedArtifactPath(entry.relativePath)}
+                            >
+                              <FileText size={14} aria-hidden="true" />
+                              {entry.relativePath.split('/').at(-1)}
+                            </button>
+                          ))}
+                        {change.missingArtifacts.length > 0 && (
+                          <span className="missing-note">
+                            <CircleAlert size={14} aria-hidden="true" />
+                            缺少：{change.missingArtifacts.join('、')}
+                          </span>
+                        )}
+                      </div>
+                      {artifact ? (
+                        <MarkdownPane
+                          projectId={project.project.id}
+                          artifact={artifact}
+                          desktop={desktop}
+                        />
+                      ) : (
+                        <EmptyState icon={<FileText size={20} />} title="暂无文档" />
+                      )}
+                    </Tabs.Content>
+                    <Tabs.Content value="tasks" className="detail-content">
+                      <TasksPane change={change} />
+                    </Tabs.Content>
+                    <Tabs.Content value="readiness" className="detail-content readiness-content">
+                      <ReadinessPane
+                        assessment={lifecycleQuery.data}
+                        loading={lifecycleQuery.isLoading}
+                        error={lifecycleQuery.error}
+                        artifacts={change.artifacts}
+                        focusSection={readinessFocus.section}
+                        focusNonce={readinessFocus.nonce}
+                        onNavigateArtifact={navigateToArtifact}
+                        validationRunning={validationIsRunning}
+                        validationError={validationMutation.error}
+                      />
+                    </Tabs.Content>
+                    <Tabs.Content value="activity" className="detail-content">
+                      {project && (
+                        <ActivityPane
+                          projectId={project.project.id}
+                          changeId={change.id}
+                          desktop={desktop}
+                          versionSummaries={versionSummaries}
+                          versionKey={selectedVersionKey}
+                          onVersionChange={selectVersion}
+                        />
+                      )}
+                    </Tabs.Content>
+                    <Tabs.Content value="revisions" className="detail-content">
+                      {project && (
+                        <RevisionsPane
+                          projectId={project.project.id}
+                          artifact={artifact}
+                          desktop={desktop}
+                          versionSummaries={versionSummaries}
+                          versionKey={selectedVersionKey}
+                          onVersionChange={selectVersion}
+                        />
+                      )}
+                    </Tabs.Content>
+                  </Tabs.Root>
+                </>
+              )}
+            </main>
+          </>
+        )}
       </div>
       {notice && (
         <div
-          className={`toast toast-${notice.tone}`}
+          className={`toast toast-${notice.tone} is-${notice.phase}`}
           role="status"
           aria-live={notice.tone === 'error' ? 'assertive' : 'polite'}
           aria-atomic="true"
@@ -1664,7 +2431,16 @@ function Workspace({ desktop }: { desktop: DesktopApi | undefined }): React.JSX.
           ) : (
             <CircleAlert size={15} aria-hidden="true" />
           )}
-          {notice.text}
+          <span className="toast-message">{notice.text}</span>
+          <button
+            type="button"
+            className="toast-close"
+            aria-label="关闭通知"
+            title="关闭通知"
+            onClick={dismissNotice}
+          >
+            <X size={14} aria-hidden="true" />
+          </button>
         </div>
       )}
       {project && (
@@ -1702,7 +2478,7 @@ function ProjectDialog({
   groups: AppSnapshot['catalog']['groups'];
   desktop: DesktopApi | undefined;
   onClose: () => void;
-  onRun: (action: () => Promise<unknown>, success?: string) => Promise<void>;
+  onRun: (action: () => Promise<unknown>, success?: string) => Promise<boolean>;
 }): React.JSX.Element | null {
   const [name, setName] = useState(project.displayName);
   const [version, setVersion] = useState(project.versionLabel);
@@ -1736,7 +2512,10 @@ function ProjectDialog({
     setStoragePath(await desktop.getUserDataPath());
   };
   const clearHistory = () => {
-    if (desktop && window.confirm('只会删除本地快照和活动，不会改动项目文件。继续？')) {
+    if (
+      desktop &&
+      window.confirm('将删除本地快照、活动、实施轮次和归档基线，不会改动项目文件。继续？')
+    ) {
       void onRun(
         () =>
           desktop.clearHistory({
@@ -1887,6 +2666,18 @@ function ProjectDialog({
               </label>
             </div>
           </div>
+          <div className="settings-privacy-note" role="note" aria-label="本地数据说明">
+            <strong>本地数据说明</strong>
+            <span>
+              行动中心只读，不会修改项目或 Git；严格验证只检查 OpenSpec 契约，不代表代码已交付。
+              实施轮次从本机首次观察开始。清除历史会重置快照、活动、轮次和归档基线，
+              且不会改动项目文件。
+            </span>
+            <span>
+              归档就绪只表示项目工件、任务和严格验证满足门槛，不证明需求或实现正确。
+              旧版规格保障数据已停用；应用不会读取、迁移或自动清理它。
+            </span>
+          </div>
           <div className="dialog-actions">
             <button
               type="button"
@@ -1943,7 +2734,10 @@ function ProjectDialog({
               className="command-button"
               onClick={() => {
                 if (desktop)
-                  void onRun(() => desktop.rescanProject({ projectId: project.id }), '扫描完成');
+                  void onRun(
+                    () => desktop.rescanProject({ projectId: project.id }),
+                    '项目已重新扫描',
+                  );
               }}
             >
               <RefreshCw size={16} aria-hidden="true" />

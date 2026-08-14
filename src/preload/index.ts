@@ -1,8 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { projectionEventSchema } from '@shared/contracts';
+import {
+  codexImportResultSchema,
+  codexProjectListSchema,
+  projectionEventSchema,
+} from '@shared/contracts';
 import type { DesktopApi } from '@shared/desktop-api';
 import {
+  actionCenterRequestSchema,
+  buildCodexHandoffRequestSchema,
   clearHistoryRequestSchema,
+  changeLifecycleRequestSchema,
   codexImportProjectsRequestSchema,
   compareRevisionsRequestSchema,
   createGroupRequestSchema,
@@ -18,6 +25,7 @@ import {
   relocateProjectRequestSchema,
   selectRelocationRequestSchema,
   revealArtifactRequestSchema,
+  runChangeValidationRequestSchema,
   setRetentionRequestSchema,
   updatePreferencesRequestSchema,
   updateProjectRequestSchema,
@@ -33,9 +41,14 @@ const desktopApi: DesktopApi = {
   selectProject: () => ipcRenderer.invoke('catalog:select-project', emptyRequestSchema.parse({})),
   registerProject: (request) =>
     ipcRenderer.invoke('catalog:register-project', registerProjectRequestSchema.parse(request)),
-  listCodexProjects: () => ipcRenderer.invoke('codex:list-projects', emptyRequestSchema.parse({})),
+  listCodexProjects: () =>
+    ipcRenderer
+      .invoke('codex:list-projects', emptyRequestSchema.parse({}))
+      .then((response) => codexProjectListSchema.parse(response)),
   importCodexProjects: (request) =>
-    ipcRenderer.invoke('codex:import-projects', codexImportProjectsRequestSchema.parse(request)),
+    ipcRenderer
+      .invoke('codex:import-projects', codexImportProjectsRequestSchema.parse(request))
+      .then((response) => codexImportResultSchema.parse(response)),
   updateProject: (request) =>
     ipcRenderer.invoke('catalog:update-project', updateProjectRequestSchema.parse(request)),
   relocateProject: (request) =>
@@ -54,6 +67,21 @@ const desktopApi: DesktopApi = {
     ipcRenderer.invoke('project:rescan', projectIdRequestSchema.parse(request)),
   refreshVersion: (request) =>
     ipcRenderer.invoke('project:refresh-version', refreshVersionRequestSchema.parse(request)),
+  getChangeLifecycle: (request) =>
+    ipcRenderer.invoke('lifecycle:get-change', changeLifecycleRequestSchema.parse(request)),
+  runChangeValidation: (request) =>
+    ipcRenderer.invoke('lifecycle:run-validation', runChangeValidationRequestSchema.parse(request)),
+  getActionCenter: (request) =>
+    ipcRenderer.invoke('action-center:get', actionCenterRequestSchema.parse(request)),
+  refreshActionCenter: (request) =>
+    ipcRenderer.invoke('action-center:refresh', actionCenterRequestSchema.parse(request)),
+  buildCodexHandoff: (request) =>
+    ipcRenderer.invoke(
+      'action-center:build-handoff',
+      buildCodexHandoffRequestSchema.parse(request),
+    ),
+  copyCodexHandoff: (request) =>
+    ipcRenderer.invoke('action-center:copy-handoff', buildCodexHandoffRequestSchema.parse(request)),
   listRevisions: (request) =>
     ipcRenderer.invoke('history:list-revisions', historyRevisionListRequestSchema.parse(request)),
   listActivity: (request) =>

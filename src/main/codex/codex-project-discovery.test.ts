@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   codexProjectPathKey,
   discoverCodexProjects,
@@ -14,6 +14,22 @@ async function makeOpenSpecProject(parent: string, name: string): Promise<string
   await fs.mkdir(join(root, 'openspec', 'changes'), { recursive: true });
   await fs.writeFile(join(root, 'openspec', 'config.yaml'), 'schema: spec-driven\n');
   return root;
+}
+
+async function makeRepository(parent: string, name: string, marker = '.git'): Promise<string> {
+  const root = join(parent, name);
+  await fs.mkdir(root, { recursive: true });
+  if (marker === '.git') await fs.mkdir(join(root, marker));
+  else await fs.writeFile(join(root, marker), '{}');
+  return root;
+}
+
+async function writeCodexState(codexHome: string, roots: string[]): Promise<void> {
+  await fs.mkdir(codexHome, { recursive: true });
+  await fs.writeFile(
+    join(codexHome, '.codex-global-state.json'),
+    JSON.stringify({ 'electron-saved-workspace-roots': roots }),
+  );
 }
 
 describe('Codex project discovery', () => {
@@ -62,22 +78,24 @@ describe('Codex project discovery', () => {
 
       expect(result.summary).toMatchObject({
         source: 'primary',
-        candidateCount: 4,
+        indexedRootCount: 5,
+        workspaceCount: 0,
+        repositoryCount: 3,
+        openSpecProjectCount: 3,
         availableCount: 2,
         truncated: false,
       });
-      expect(result.candidates.map((candidate) => candidate.displayName)).toEqual([
+      expect(result.entries.map((candidate) => candidate.displayName)).toEqual([
         'Beta',
         'Alpha',
         'Alpha',
         'extra',
       ]);
-      expect(result.candidates.map((candidate) => candidate.status)).toEqual([
-        'already-added',
-        'available',
-        'invalid-openspec',
-        'available',
-      ]);
+      expect(
+        result.entries.map((candidate) =>
+          candidate.kind === 'direct-project' ? candidate.status : null,
+        ),
+      ).toEqual(['already-added', 'available', 'unrecognized', 'available']);
       expect(JSON.stringify(result)).not.toContain('private fixture value');
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -102,7 +120,7 @@ describe('Codex project discovery', () => {
       const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
       expect(result.summary.source).toBe('backup');
       expect(result.summary.message).toContain('只读备份');
-      expect(result.candidates).toHaveLength(1);
+      expect(result.entries).toHaveLength(1);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -121,7 +139,7 @@ describe('Codex project discovery', () => {
       );
       const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
       expect(result.summary.source).toBe('unavailable');
-      expect(result.candidates).toEqual([]);
+      expect(result.entries).toEqual([]);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -152,11 +170,239 @@ describe('Codex project discovery', () => {
         readRetries: 0,
       });
       expect(result.summary).toMatchObject({
-        candidateCount: 1,
+        indexedRootCount: 2,
         availableCount: 1,
         truncated: true,
       });
     } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('discovers demo repositories as a bounded workspace with accurate counts', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codex-workspace-'));
+    try {
+      const workspace = join(root, 'Demo');
+      await fs.mkdir(workspace);
+      const frontend = await makeOpenSpecProject(workspace, 'demo-web');
+      await makeRepository(workspace, 'demo-api');
+      await makeRepository(workspace, 'demo-docs', 'package.json');
+      await fs.mkdir(join(workspace, 'notes'));
+      const codexHome = join(root, '.codex');
+      await writeCodexState(codexHome, [workspace]);
+
+      const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0]).toMatchObject({
+        kind: 'workspace',
+        displayName: 'Demo',
+        repositoryCount: 3,
+        openSpecProjectCount: 1,
+        availableCount: 1,
+        truncated: false,
+      });
+      const entry = result.entries[0];
+      if (!entry || entry.kind !== 'workspace') throw new Error('expected workspace');
+      expect(entry.members.map((member) => member.kind)).toEqual([
+        'repository',
+        'repository',
+        'openspec-project',
+      ]);
+      expect(entry.members.find((member) => member.rootPath === frontend)?.status).toBe(
+        'available',
+      );
+      expect(result.summary).toMatchObject({
+        indexedRootCount: 1,
+        workspaceCount: 1,
+        repositoryCount: 3,
+        openSpecProjectCount: 1,
+        availableCount: 1,
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('short-circuits direct OpenSpec roots and does not scan their descendants', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codex-direct-short-circuit-'));
+    try {
+      const direct = await makeOpenSpecProject(root, 'direct');
+      await makeOpenSpecProject(direct, 'nested');
+      const codexHome = join(root, '.codex');
+      await writeCodexState(codexHome, [direct]);
+
+      const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0]).toMatchObject({ kind: 'direct-project', rootPath: direct });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('finds two-level projects while skipping excluded output and dependency directories', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codex-workspace-depth-'));
+    try {
+      const workspace = join(root, 'workspace');
+      await fs.mkdir(join(workspace, 'containers', 'nested'), { recursive: true });
+      const nested = await makeOpenSpecProject(join(workspace, 'containers'), 'nested-project');
+      const excluded = await makeOpenSpecProject(join(workspace, 'node_modules'), 'hidden');
+      await makeOpenSpecProject(workspace, 'node_modules');
+      const codexHome = join(root, '.codex');
+      await writeCodexState(codexHome, [workspace]);
+
+      const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
+      const entry = result.entries[0];
+      if (!entry || entry.kind !== 'workspace') throw new Error('expected workspace');
+      expect(entry.members.map((member) => member.rootPath)).toContain(nested);
+      expect(entry.members.map((member) => member.rootPath)).not.toContain(excluded);
+      expect(entry.members).toHaveLength(1);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports not-configured repositories and truncation without treating ordinary folders as projects', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codex-workspace-budget-'));
+    try {
+      const workspace = join(root, 'workspace');
+      await fs.mkdir(workspace);
+      await makeRepository(workspace, 'repo');
+      await fs.mkdir(join(workspace, 'container', 'deep'), { recursive: true });
+      const deep = await makeOpenSpecProject(join(workspace, 'container'), 'deep-project');
+      const codexHome = join(root, '.codex');
+      await writeCodexState(codexHome, [workspace]);
+
+      const result = await discoverCodexProjects({
+        userHome: root,
+        codexHome,
+        maxDepth: 1,
+        maxDirectories: 3,
+        readRetries: 0,
+      });
+      const entry = result.entries[0];
+      if (!entry || entry.kind !== 'workspace') throw new Error('expected workspace');
+      expect(entry.members).toHaveLength(1);
+      const member = entry.members[0];
+      if (!member) throw new Error('expected repository member');
+      expect(member).toMatchObject({ kind: 'repository', status: 'not-configured' });
+      expect(entry.members.map((member) => member.rootPath)).not.toContain(deep);
+      expect(entry.truncated).toBe(true);
+      expect(entry.truncationReasons.length).toBeGreaterThan(0);
+      expect(result.summary.truncated).toBe(false);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('deduplicates direct and overlapping workspace sources using the nearest ancestor', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codex-workspace-overlap-'));
+    try {
+      const outer = join(root, 'outer');
+      const inner = join(outer, 'inner');
+      await fs.mkdir(inner, { recursive: true });
+      const project = await makeOpenSpecProject(inner, 'project');
+      const codexHome = join(root, '.codex');
+      await writeCodexState(codexHome, [project, outer, inner]);
+
+      const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
+      const directProjects = result.entries.filter((entry) => entry.kind === 'direct-project');
+      expect(directProjects).toHaveLength(0);
+      const workspaces = result.entries.filter((entry) => entry.kind === 'workspace');
+      expect(workspaces).toHaveLength(1);
+      const workspace = workspaces[0];
+      if (!workspace || workspace.kind !== 'workspace') throw new Error('expected workspace');
+      expect(workspace).toMatchObject({ rootPath: inner });
+      expect(workspace.members.map((member) => member.rootPath)).toEqual([project]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('returns an unavailable direct entry for a missing indexed root', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codex-unavailable-root-'));
+    try {
+      const missing = join(root, 'missing');
+      const codexHome = join(root, '.codex');
+      await writeCodexState(codexHome, [missing]);
+      const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0]).toMatchObject({
+        kind: 'direct-project',
+        status: 'unavailable',
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('marks registered workspace members as added and keeps same-named workspaces distinct', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codex-workspace-identity-'));
+    try {
+      const firstWorkspace = join(root, 'first', 'workspace');
+      const secondWorkspace = join(root, 'second', 'workspace');
+      await fs.mkdir(firstWorkspace, { recursive: true });
+      await fs.mkdir(secondWorkspace, { recursive: true });
+      const firstProject = await makeOpenSpecProject(firstWorkspace, 'project');
+      await makeOpenSpecProject(secondWorkspace, 'project');
+      const codexHome = join(root, '.codex');
+      await writeCodexState(codexHome, [firstWorkspace, secondWorkspace]);
+
+      const result = await discoverCodexProjects({
+        userHome: root,
+        codexHome,
+        registeredRoots: [firstProject],
+        readRetries: 0,
+      });
+      const workspaces = result.entries.filter((entry) => entry.kind === 'workspace');
+      expect(workspaces).toHaveLength(2);
+      expect(new Set(workspaces.map((workspace) => workspace.id)).size).toBe(2);
+      expect(workspaces.map((workspace) => workspace.displayName)).toEqual([
+        'workspace',
+        'workspace',
+      ]);
+      expect(workspaces[0]?.members[0]).toMatchObject({ status: 'already-added' });
+      expect(result.summary.availableCount).toBe(1);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('skips directory links and isolates a member that disappears during scanning', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codex-workspace-local-error-'));
+    const originalLstat = fs.lstat.bind(fs);
+    try {
+      const workspace = join(root, 'workspace');
+      await fs.mkdir(workspace);
+      const healthy = await makeOpenSpecProject(workspace, 'healthy');
+      const vanishing = await makeRepository(workspace, 'vanishing');
+      const outside = await makeOpenSpecProject(root, 'outside');
+      const linked = join(workspace, 'linked');
+      try {
+        await fs.symlink(outside, linked, process.platform === 'win32' ? 'junction' : 'dir');
+      } catch {
+        // Some Windows policies disable symlink creation; the disappearing-member assertion remains valid.
+      }
+      let removed = false;
+      vi.spyOn(fs, 'lstat').mockImplementation(async (path) => {
+        if (!removed && String(path) === vanishing) {
+          removed = true;
+          await fs.rm(vanishing, { recursive: true, force: true });
+        }
+        return originalLstat(path);
+      });
+      const codexHome = join(root, '.codex');
+      await writeCodexState(codexHome, [workspace]);
+
+      const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
+      const entry = result.entries[0];
+      if (!entry || entry.kind !== 'workspace') throw new Error('expected workspace');
+      expect(entry.members.map((member) => member.rootPath)).toEqual([healthy]);
+      expect(entry.members.map((member) => member.rootPath)).not.toContain(outside);
+      expect(entry.diagnostics).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: 'disappeared', path: vanishing })]),
+      );
+    } finally {
+      vi.restoreAllMocks();
       await fs.rm(root, { recursive: true, force: true });
     }
   });

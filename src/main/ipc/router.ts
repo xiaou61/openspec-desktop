@@ -1,6 +1,9 @@
 import type { z } from 'zod';
 import {
+  actionCenterRequestSchema,
+  buildCodexHandoffRequestSchema,
   clearHistoryRequestSchema,
+  changeLifecycleRequestSchema,
   codexImportProjectsRequestSchema,
   codexListProjectsRequestSchema,
   compareRevisionsRequestSchema,
@@ -19,6 +22,7 @@ import {
   relocateProjectRequestSchema,
   selectRelocationRequestSchema,
   revealArtifactRequestSchema,
+  runChangeValidationRequestSchema,
   scanRequestSchema,
   updateProjectRequestSchema,
   updatePreferencesRequestSchema,
@@ -104,6 +108,24 @@ export function createIpcRouter(controller: AppController): IpcRouter {
   );
   router.add('project:refresh-version', refreshVersionRequestSchema, (request) =>
     controller.refreshVersion(request),
+  );
+  router.add('lifecycle:get-change', changeLifecycleRequestSchema, (request) =>
+    controller.getChangeLifecycle(request),
+  );
+  router.add('lifecycle:run-validation', runChangeValidationRequestSchema, (request) =>
+    controller.runChangeValidation(request),
+  );
+  router.add('action-center:get', actionCenterRequestSchema, (request) =>
+    controller.getActionCenter(request),
+  );
+  router.add('action-center:refresh', actionCenterRequestSchema, (request) =>
+    controller.refreshActionCenter(request),
+  );
+  router.add('action-center:build-handoff', buildCodexHandoffRequestSchema, (request) =>
+    controller.buildCodexHandoff(request),
+  );
+  router.add('action-center:copy-handoff', buildCodexHandoffRequestSchema, (request) =>
+    controller.copyCodexHandoff(request),
   );
   router.add('project:get-snapshot', projectIdRequestSchema, (request) => {
     const project = controller

@@ -10,6 +10,17 @@ export interface DirectoryDialog {
   }>;
 }
 
+export interface ReportFileDialog {
+  showOpenDialog(options: {
+    title: string;
+    properties: ['openFile'];
+    filters: Array<{ name: string; extensions: string[] }>;
+  }): Promise<{
+    canceled: boolean;
+    filePaths: string[];
+  }>;
+}
+
 export async function selectOpenSpecProjectDirectory(
   dialog: DirectoryDialog,
 ): Promise<string | null> {

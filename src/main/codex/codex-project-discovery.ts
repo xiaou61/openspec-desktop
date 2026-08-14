@@ -1,15 +1,53 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { basename, join, normalize, parse, resolve } from 'node:path';
+import { basename, join, normalize, parse, relative, resolve } from 'node:path';
 import {
+  codexDiscoveryDiagnosticSchema,
   codexProjectListSchema,
-  type CodexProjectCandidate,
+  type CodexDirectProject,
+  type CodexDiscoveryDiagnostic,
+  type CodexDiscoveryEntry,
+  type CodexDiscoverySource,
+  type CodexOpenSpecWorkspaceMember,
   type CodexProjectList,
+  type CodexUnconfiguredRepository,
+  type CodexWorkspace,
+  type CodexWorkspaceMember,
 } from '@shared/contracts';
 import { validateOpenSpecProject } from '../domain/paths';
 
 export const DEFAULT_MAX_CODEX_STATE_BYTES = 5 * 1024 * 1024;
 export const DEFAULT_MAX_CODEX_CANDIDATES = 500;
+export const DEFAULT_MAX_WORKSPACE_DEPTH = 2;
+export const DEFAULT_MAX_WORKSPACE_DIRECTORIES = 2_000;
+export const DEFAULT_MAX_WORKSPACE_MEMBERS = 200;
+export const DEFAULT_MAX_WORKSPACE_CONCURRENCY = 4;
+export const DEFAULT_WORKSPACE_TIME_BUDGET_MS = 1_000;
+
+const DEFAULT_EXCLUDED_DIRECTORY_NAMES = [
+  '.git',
+  'node_modules',
+  '.next',
+  'dist',
+  'build',
+  'target',
+  'coverage',
+  '.cache',
+  '.venv',
+  'vendor',
+  '.idea',
+  '.vscode',
+];
+
+const SUPPORTED_MANIFEST_NAMES = new Set([
+  'package.json',
+  'pom.xml',
+  'build.gradle',
+  'build.gradle.kts',
+  'pyproject.toml',
+  'cargo.toml',
+  'go.mod',
+]);
 
 interface CodexProjectEntry {
   id: string;
@@ -21,25 +59,68 @@ interface CodexProjectEntry {
 interface IndexedRoot {
   displayName: string;
   rootPath: string;
-  source: CodexProjectCandidate['source'];
+  source: CodexDiscoverySource;
   lastUsedAt?: string;
+  index: number;
 }
 
 interface ParsedProjectIndex {
   recognized: boolean;
   roots: IndexedRoot[];
+  indexedRootCount: number;
   truncated: boolean;
+  truncationReasons: Array<'max-candidates'>;
 }
 
-export interface DiscoverCodexProjectsOptions {
+export interface WorkspaceDiscoveryOptions {
+  maxDepth?: number;
+  maxDirectories?: number;
+  maxMembers?: number;
+  maxConcurrency?: number;
+  timeBudgetMs?: number;
+  excludeDirectories?: string[];
+  registeredRoots?: string[];
+}
+
+export interface DiscoverCodexProjectsOptions extends WorkspaceDiscoveryOptions {
   userHome: string;
   codexHome?: string;
-  registeredRoots?: string[];
   maxStateBytes?: number;
   maxCandidates?: number;
   readRetries?: number;
   retryDelayMs?: number;
   platform?: NodeJS.Platform;
+}
+
+export interface WorkspaceDiscoveryResult {
+  members: CodexWorkspaceMember[];
+  diagnostics: CodexDiscoveryDiagnostic[];
+  truncated: boolean;
+  truncationReasons: Array<
+    'max-depth' | 'max-directories' | 'max-members' | 'time-budget' | 'max-candidates'
+  >;
+}
+
+interface EffectiveWorkspaceLimits {
+  maxDepth: number;
+  maxDirectories: number;
+  maxMembers: number;
+  maxConcurrency: number;
+  timeBudgetMs: number;
+  excludeDirectories: Set<string>;
+}
+
+interface DirectoryEntry {
+  name: string;
+  isDirectory(): boolean;
+  isFile(): boolean;
+  isSymbolicLink(): boolean;
+}
+
+interface QueuedDirectory {
+  path: string;
+  depth: number;
+  entries: DirectoryEntry[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -99,11 +180,25 @@ function parseProjectEntry(id: string, value: unknown): CodexProjectEntry | null
 }
 
 function parseProjectIndex(value: unknown, maxCandidates: number): ParsedProjectIndex {
-  if (!isRecord(value)) return { recognized: false, roots: [], truncated: false };
+  if (!isRecord(value))
+    return {
+      recognized: false,
+      roots: [],
+      indexedRootCount: 0,
+      truncated: false,
+      truncationReasons: [],
+    };
   const localProjectsValue = value['local-projects'];
   const savedRootsValue = value['electron-saved-workspace-roots'];
   const recognized = isRecord(localProjectsValue) || Array.isArray(savedRootsValue);
-  if (!recognized) return { recognized: false, roots: [], truncated: false };
+  if (!recognized)
+    return {
+      recognized: false,
+      roots: [],
+      indexedRootCount: 0,
+      truncated: false,
+      truncationReasons: [],
+    };
 
   const localProjects = new Map<string, CodexProjectEntry>();
   if (isRecord(localProjectsValue)) {
@@ -132,6 +227,7 @@ function parseProjectIndex(value: unknown, maxCandidates: number): ParsedProject
         displayName: project.name,
         rootPath,
         source: 'local-project',
+        index: roots.length,
         ...(lastUsedAt ? { lastUsedAt } : {}),
       });
     }
@@ -144,13 +240,18 @@ function parseProjectIndex(value: unknown, maxCandidates: number): ParsedProject
           displayName: basename(rootPath) || rootPath,
           rootPath,
           source: 'saved-workspace',
+          index: roots.length,
         });
     }
   }
+  const limit = Math.max(1, Math.min(maxCandidates, 500));
+  const truncated = roots.length > limit;
   return {
     recognized: true,
-    roots: roots.slice(0, maxCandidates),
-    truncated: roots.length > maxCandidates,
+    roots: roots.slice(0, limit),
+    indexedRootCount: Math.min(roots.length, 500),
+    truncated,
+    truncationReasons: truncated ? ['max-candidates'] : [],
   };
 }
 
@@ -184,54 +285,451 @@ async function readStateFile(
   throw lastError instanceof Error ? lastError : new Error('Codex 项目索引无法读取');
 }
 
-function candidateId(rootPath: string, platform: NodeJS.Platform): string {
-  return `codex-${createHash('sha256').update(codexProjectPathKey(rootPath, platform)).digest('hex').slice(0, 20)}`;
+function candidateId(rootPath: string, prefix = 'codex'): string {
+  return `${prefix}-${createHash('sha256').update(rootPath).digest('hex').slice(0, 20)}`;
 }
 
-async function makeCandidate(
-  indexedRoot: IndexedRoot,
-  registeredKeys: Set<string>,
-  platform: NodeJS.Platform,
-): Promise<CodexProjectCandidate> {
-  let rootPath: string;
+function effectiveLimits(options: WorkspaceDiscoveryOptions): EffectiveWorkspaceLimits {
+  return {
+    maxDepth: Math.max(0, Math.min(options.maxDepth ?? DEFAULT_MAX_WORKSPACE_DEPTH, 8)),
+    maxDirectories: Math.max(
+      1,
+      Math.min(options.maxDirectories ?? DEFAULT_MAX_WORKSPACE_DIRECTORIES, 10_000),
+    ),
+    maxMembers: Math.max(1, Math.min(options.maxMembers ?? DEFAULT_MAX_WORKSPACE_MEMBERS, 500)),
+    maxConcurrency: Math.max(
+      1,
+      Math.min(options.maxConcurrency ?? DEFAULT_MAX_WORKSPACE_CONCURRENCY, 16),
+    ),
+    timeBudgetMs: Math.max(
+      1,
+      Math.min(options.timeBudgetMs ?? DEFAULT_WORKSPACE_TIME_BUDGET_MS, 30_000),
+    ),
+    excludeDirectories: new Set(
+      (options.excludeDirectories ?? DEFAULT_EXCLUDED_DIRECTORY_NAMES).map((name) =>
+        name.toLowerCase(),
+      ),
+    ),
+  };
+}
+
+function memberPathKey(path: string): string {
+  return codexProjectPathKey(path);
+}
+
+async function canonicalPath(inputPath: string): Promise<string> {
+  const normalized = normalizeCodexProjectPath(inputPath);
   try {
-    rootPath = normalizeCodexProjectPath(indexedRoot.rootPath, platform);
+    return normalizeCodexProjectPath(await fs.realpath(normalized));
   } catch {
-    const fallbackPath = indexedRoot.rootPath.slice(0, 4096);
-    return {
-      id: candidateId(fallbackPath, platform),
-      displayName: indexedRoot.displayName,
-      rootPath: fallbackPath,
-      source: indexedRoot.source,
-      status: 'invalid-openspec',
-      reason: '项目路径不是有效的绝对路径',
-      ...(indexedRoot.lastUsedAt ? { lastUsedAt: indexedRoot.lastUsedAt } : {}),
-    };
+    return normalized;
   }
-  const base = {
-    id: candidateId(rootPath, platform),
+}
+
+function isPathWithin(parent: string, child: string): boolean {
+  const parentKey = memberPathKey(parent);
+  const childKey = memberPathKey(child);
+  if (parentKey === childKey) return true;
+  const relativePath = relative(parent, child);
+  return relativePath.length > 0 && !relativePath.startsWith('..') && !/^[\\/]/.test(relativePath);
+}
+
+function pathDistance(parent: string, child: string): number | null {
+  if (!isPathWithin(parent, child)) return null;
+  const relativePath = relative(parent, child);
+  if (!relativePath) return 0;
+  return relativePath.split(/[\\/]/).filter(Boolean).length;
+}
+
+function diagnosticCode(error: unknown): 'unreadable' | 'disappeared' | 'scan-error' {
+  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+  return code === 'ENOENT' || code === 'ENOTDIR' ? 'disappeared' : 'unreadable';
+}
+
+function addReason(
+  reasons: WorkspaceDiscoveryResult['truncationReasons'],
+  reason: WorkspaceDiscoveryResult['truncationReasons'][number],
+): void {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+function isRepositoryMarker(entries: DirectoryEntry[]): boolean {
+  return entries.some((entry) => {
+    const lowerName = entry.name.toLowerCase();
+    if (lowerName === '.git') return true;
+    if (SUPPORTED_MANIFEST_NAMES.has(lowerName)) return true;
+    return entry.isFile() && lowerName.endsWith('.sln');
+  });
+}
+
+function registeredKeySet(options: WorkspaceDiscoveryOptions): Set<string> {
+  return new Set((options.registeredRoots ?? []).map((rootPath) => memberPathKey(rootPath)));
+}
+
+async function readDirectoryEntries(path: string): Promise<DirectoryEntry[]> {
+  const entries = await fs.readdir(path, { withFileTypes: true });
+  return [...entries].sort((left, right) => left.name.localeCompare(right.name, 'en'));
+}
+
+export async function discoverWorkspaceMembers(
+  rootPathInput: string,
+  options: WorkspaceDiscoveryOptions = {},
+): Promise<WorkspaceDiscoveryResult> {
+  const limits = effectiveLimits(options);
+  const registeredKeys = registeredKeySet(options);
+  const rootPath = await canonicalPath(rootPathInput);
+  const deadline = Date.now() + limits.timeBudgetMs;
+  const members: CodexWorkspaceMember[] = [];
+  const diagnostics: CodexDiscoveryDiagnostic[] = [];
+  const truncationReasons: WorkspaceDiscoveryResult['truncationReasons'] = [];
+  const queued: QueuedDirectory[] = [];
+  let directoriesChecked = 0;
+
+  const isBudgetAvailable = (): boolean => {
+    if (Date.now() >= deadline) {
+      addReason(truncationReasons, 'time-budget');
+      return false;
+    }
+    if (members.length >= limits.maxMembers) {
+      addReason(truncationReasons, 'max-members');
+      return false;
+    }
+    return true;
+  };
+
+  const inspectDirectory = async (path: string): Promise<DirectoryEntry[] | null> => {
+    if (!isBudgetAvailable()) return null;
+    if (directoriesChecked >= limits.maxDirectories) {
+      addReason(truncationReasons, 'max-directories');
+      return null;
+    }
+    directoriesChecked += 1;
+    try {
+      return await readDirectoryEntries(path);
+    } catch (error) {
+      diagnostics.push(
+        codexDiscoveryDiagnosticSchema.parse({
+          code: diagnosticCode(error),
+          path,
+          message: error instanceof Error ? error.message.slice(0, 500) : '目录不可读取',
+        }),
+      );
+      return null;
+    }
+  };
+
+  const rootEntries = await inspectDirectory(rootPath);
+  if (!rootEntries) {
+    return { members, diagnostics, truncated: true, truncationReasons };
+  }
+  queued.push({ path: rootPath, depth: 0, entries: rootEntries });
+
+  while (queued.length > 0 && isBudgetAvailable()) {
+    const currentBatch = queued.splice(0, limits.maxConcurrency);
+    for (const directory of currentBatch) {
+      if (!isBudgetAvailable()) break;
+      const children = directory.entries.filter((entry) => {
+        if (entry.isSymbolicLink()) return false;
+        return entry.isDirectory() && !limits.excludeDirectories.has(entry.name.toLowerCase());
+      });
+
+      for (let offset = 0; offset < children.length; offset += limits.maxConcurrency) {
+        const batch = children.slice(offset, offset + limits.maxConcurrency);
+        const results = await Promise.all(
+          batch.map(async (entry) => {
+            const rawChildPath = join(directory.path, entry.name);
+            if (entry.isSymbolicLink()) return null;
+            let childPath: string;
+            try {
+              const rawStat = await fs.lstat(rawChildPath);
+              if (rawStat.isSymbolicLink() || !rawStat.isDirectory()) return null;
+              childPath = await canonicalPath(rawChildPath);
+            } catch (error) {
+              diagnostics.push(
+                codexDiscoveryDiagnosticSchema.parse({
+                  code: diagnosticCode(error),
+                  path: rawChildPath,
+                  message: error instanceof Error ? error.message.slice(0, 500) : '成员扫描失败',
+                }),
+              );
+              return null;
+            }
+            if (!isBudgetAvailable()) return null;
+            try {
+              const validation = await validateOpenSpecProject(childPath);
+              if (validation.valid) {
+                return {
+                  kind: 'openspec-project' as const,
+                  id: candidateId(memberPathKey(childPath)),
+                  displayName: basename(childPath) || childPath,
+                  rootPath: childPath,
+                  status: registeredKeys.has(memberPathKey(childPath))
+                    ? ('already-added' as const)
+                    : ('available' as const),
+                  ...(registeredKeys.has(memberPathKey(childPath))
+                    ? { reason: '该项目已添加到工作区' }
+                    : {}),
+                } satisfies CodexOpenSpecWorkspaceMember;
+              }
+              const entries = await inspectDirectory(childPath);
+              if (!entries) return null;
+              if (isRepositoryMarker(entries)) {
+                return {
+                  kind: 'repository' as const,
+                  id: candidateId(memberPathKey(childPath)),
+                  displayName: basename(childPath) || childPath,
+                  rootPath: childPath,
+                  status: 'not-configured' as const,
+                  reason: '尚未配置 OpenSpec',
+                } satisfies CodexUnconfiguredRepository;
+              }
+              if (directory.depth + 1 >= limits.maxDepth) {
+                addReason(truncationReasons, 'max-depth');
+                return null;
+              }
+              return {
+                path: childPath,
+                depth: directory.depth + 1,
+                entries,
+              } satisfies QueuedDirectory;
+            } catch (error) {
+              diagnostics.push(
+                codexDiscoveryDiagnosticSchema.parse({
+                  code: diagnosticCode(error),
+                  path: childPath,
+                  message: error instanceof Error ? error.message.slice(0, 500) : '成员扫描失败',
+                }),
+              );
+              return null;
+            }
+          }),
+        );
+
+        for (const result of results) {
+          if (!result) continue;
+          if ('kind' in result) {
+            if (members.length >= limits.maxMembers) {
+              addReason(truncationReasons, 'max-members');
+              break;
+            }
+            members.push(result as CodexWorkspaceMember);
+          } else {
+            queued.push(result);
+          }
+        }
+        if (!isBudgetAvailable()) break;
+      }
+    }
+  }
+
+  if (queued.length > 0 && truncationReasons.length === 0)
+    addReason(truncationReasons, 'time-budget');
+  return {
+    members: members.slice(0, limits.maxMembers),
+    diagnostics: diagnostics.slice(0, 100),
+    truncated: truncationReasons.length > 0,
+    truncationReasons,
+  };
+}
+
+function directProject(
+  indexedRoot: IndexedRoot,
+  rootPath: string,
+  status: CodexDirectProject['status'],
+  reason?: string,
+): CodexDirectProject {
+  return {
+    kind: 'direct-project',
+    id: candidateId(memberPathKey(rootPath)),
     displayName: indexedRoot.displayName,
     rootPath,
     source: indexedRoot.source,
+    status,
     ...(indexedRoot.lastUsedAt ? { lastUsedAt: indexedRoot.lastUsedAt } : {}),
+    ...(reason ? { reason } : {}),
   };
-  if (registeredKeys.has(codexProjectPathKey(rootPath, platform))) {
-    return { ...base, status: 'already-added', reason: '该项目已添加到工作区' };
-  }
-  const validation = await validateOpenSpecProject(rootPath);
-  if (validation.valid) return { ...base, status: 'available' };
-  const missing = validation.reason === '项目目录不存在或不可读';
+}
+
+function workspaceProject(
+  indexedRoot: IndexedRoot,
+  rootPath: string,
+  result: WorkspaceDiscoveryResult,
+): CodexWorkspace {
   return {
-    ...base,
-    status: missing ? 'missing' : 'invalid-openspec',
-    reason: validation.reason ?? '不是有效的 OpenSpec 项目',
+    kind: 'workspace',
+    id: candidateId(memberPathKey(rootPath), 'workspace'),
+    displayName: indexedRoot.displayName || basename(rootPath) || rootPath,
+    rootPath,
+    source: indexedRoot.source,
+    ...(indexedRoot.lastUsedAt ? { lastUsedAt: indexedRoot.lastUsedAt } : {}),
+    members: result.members,
+    diagnostics: result.diagnostics,
+    truncated: result.truncated,
+    truncationReasons: result.truncationReasons,
+    repositoryCount: result.members.length,
+    openSpecProjectCount: result.members.filter((member) => member.kind === 'openspec-project')
+      .length,
+    availableCount: result.members.filter(
+      (member) => member.kind === 'openspec-project' && member.status === 'available',
+    ).length,
   };
+}
+
+async function classifyIndexedRoot(
+  indexedRoot: IndexedRoot,
+  options: WorkspaceDiscoveryOptions,
+): Promise<CodexDiscoveryEntry> {
+  let rootPath: string;
+  try {
+    const normalizedInput = normalizeCodexProjectPath(indexedRoot.rootPath);
+    const rawStat = await fs.lstat(normalizedInput);
+    if (rawStat.isSymbolicLink() || !rawStat.isDirectory())
+      return directProject(indexedRoot, normalizedInput, 'unavailable', '项目目录不存在或不可读');
+    rootPath = await canonicalPath(normalizedInput);
+  } catch {
+    return directProject(
+      indexedRoot,
+      indexedRoot.rootPath.slice(0, 4096),
+      'unavailable',
+      '项目路径不是有效的绝对路径',
+    );
+  }
+  try {
+    const stat = await fs.lstat(rootPath);
+    if (stat.isSymbolicLink() || !stat.isDirectory())
+      return directProject(indexedRoot, rootPath, 'unavailable', '项目目录不存在或不可读');
+  } catch {
+    return directProject(indexedRoot, rootPath, 'unavailable', '项目目录不存在或不可读');
+  }
+
+  const registeredKeys = registeredKeySet(options);
+  const validation = await validateOpenSpecProject(rootPath);
+  if (validation.valid) {
+    return directProject(
+      indexedRoot,
+      rootPath,
+      registeredKeys.has(memberPathKey(rootPath)) ? 'already-added' : 'available',
+      registeredKeys.has(memberPathKey(rootPath)) ? '该项目已添加到工作区' : undefined,
+    );
+  }
+  if (validation.reason === '项目目录不存在或不可读')
+    return directProject(indexedRoot, rootPath, 'unavailable', validation.reason);
+
+  const result = await discoverWorkspaceMembers(rootPath, options);
+  if (result.members.length === 0 && result.diagnostics.length === 0 && !result.truncated)
+    return directProject(indexedRoot, rootPath, 'unrecognized', '未发现 OpenSpec 项目或代码仓库');
+  return workspaceProject(indexedRoot, rootPath, result);
+}
+
+function mergeWorkspaceEntries(
+  entries: Array<{ entry: CodexWorkspace; index: number }>,
+): Array<{ entry: CodexWorkspace; index: number }> {
+  const byRoot = new Map<string, { entry: CodexWorkspace; index: number }>();
+  for (const current of entries) {
+    const key = memberPathKey(current.entry.rootPath);
+    const existing = byRoot.get(key);
+    if (!existing) {
+      byRoot.set(key, {
+        entry: {
+          ...current.entry,
+          members: [...current.entry.members],
+          diagnostics: [...current.entry.diagnostics],
+        },
+        index: current.index,
+      });
+      continue;
+    }
+    const memberMap = new Map(
+      existing.entry.members.map((member) => [memberPathKey(member.rootPath), member]),
+    );
+    for (const member of current.entry.members)
+      memberMap.set(memberPathKey(member.rootPath), member);
+    existing.entry.members = [...memberMap.values()];
+    existing.entry.diagnostics = [
+      ...existing.entry.diagnostics,
+      ...current.entry.diagnostics,
+    ].slice(0, 100);
+    existing.entry.truncated = existing.entry.truncated || current.entry.truncated;
+    existing.entry.truncationReasons = [
+      ...new Set([...existing.entry.truncationReasons, ...current.entry.truncationReasons]),
+    ];
+  }
+
+  const merged = [...byRoot.values()];
+  const winners = new Map<string, { rootKey: string; distance: number; index: number }>();
+  for (const workspace of merged) {
+    for (const member of workspace.entry.members) {
+      const distance = pathDistance(workspace.entry.rootPath, member.rootPath);
+      if (distance === null) continue;
+      const key = memberPathKey(member.rootPath);
+      const current = winners.get(key);
+      if (
+        !current ||
+        distance < current.distance ||
+        (distance === current.distance && workspace.index < current.index)
+      )
+        winners.set(key, {
+          rootKey: memberPathKey(workspace.entry.rootPath),
+          distance,
+          index: workspace.index,
+        });
+    }
+  }
+  for (const workspace of merged) {
+    workspace.entry.members = workspace.entry.members.filter(
+      (member) =>
+        winners.get(memberPathKey(member.rootPath))?.rootKey ===
+        memberPathKey(workspace.entry.rootPath),
+    );
+    workspace.entry.repositoryCount = workspace.entry.members.length;
+    workspace.entry.openSpecProjectCount = workspace.entry.members.filter(
+      (member) => member.kind === 'openspec-project',
+    ).length;
+    workspace.entry.availableCount = workspace.entry.members.filter(
+      (member) => member.kind === 'openspec-project' && member.status === 'available',
+    ).length;
+  }
+  return merged.filter(
+    ({ entry }) => entry.members.length > 0 || entry.diagnostics.length > 0 || entry.truncated,
+  );
+}
+
+function mergeDiscoveredEntries(
+  collected: Array<{ entry: CodexDiscoveryEntry; index: number }>,
+): CodexDiscoveryEntry[] {
+  const directByPath = new Map<string, { entry: CodexDirectProject; index: number }>();
+  for (const current of collected) {
+    if (current.entry.kind !== 'direct-project') continue;
+    const key = memberPathKey(current.entry.rootPath);
+    if (!directByPath.has(key))
+      directByPath.set(key, current as { entry: CodexDirectProject; index: number });
+  }
+  const workspaces = mergeWorkspaceEntries(
+    collected
+      .filter(
+        (current): current is { entry: CodexWorkspace; index: number } =>
+          current.entry.kind === 'workspace',
+      )
+      .map((current) => current),
+  );
+  const workspaceMemberPaths = new Set(
+    workspaces.flatMap(({ entry }) =>
+      entry.members.map((member) => memberPathKey(member.rootPath)),
+    ),
+  );
+  const entries: Array<{ entry: CodexDiscoveryEntry; index: number }> = [
+    ...[...directByPath.values()].filter(
+      ({ entry }) => !workspaceMemberPaths.has(memberPathKey(entry.rootPath)),
+    ),
+    ...workspaces,
+  ];
+  entries.sort((left, right) => left.index - right.index);
+  return entries.map(({ entry }) => entry);
 }
 
 export async function discoverCodexProjects(
   options: DiscoverCodexProjectsOptions,
 ): Promise<CodexProjectList> {
-  const platform = options.platform ?? process.platform;
   const codexHome = resolveCodexHome(options.userHome, options.codexHome);
   const maxStateBytes = options.maxStateBytes ?? DEFAULT_MAX_CODEX_STATE_BYTES;
   const maxCandidates = options.maxCandidates ?? DEFAULT_MAX_CODEX_CANDIDATES;
@@ -269,42 +767,54 @@ export async function discoverCodexProjects(
 
   if (!parsedIndex) {
     return codexProjectListSchema.parse({
-      candidates: [],
+      entries: [],
       summary: {
         source: 'unavailable',
-        candidateCount: 0,
+        indexedRootCount: 0,
+        workspaceCount: 0,
+        repositoryCount: 0,
+        openSpecProjectCount: 0,
         availableCount: 0,
         truncated: false,
+        truncationReasons: [],
         message: lastError?.message ?? '未找到 Codex 项目索引',
       },
       scannedAt: new Date().toISOString(),
     });
   }
 
-  const registeredKeys = new Set(
-    (options.registeredRoots ?? []).map((rootPath) => codexProjectPathKey(rootPath, platform)),
-  );
-  const seen = new Set<string>();
-  const candidates: CodexProjectCandidate[] = [];
+  const registeredRoots = options.registeredRoots ?? [];
+  const collected: Array<{ entry: CodexDiscoveryEntry; index: number }> = [];
   for (const indexedRoot of parsedIndex.roots) {
-    let key: string;
-    try {
-      key = codexProjectPathKey(indexedRoot.rootPath, platform);
-    } catch {
-      key = `invalid:${indexedRoot.rootPath}`;
-    }
-    if (seen.has(key)) continue;
-    seen.add(key);
-    candidates.push(await makeCandidate(indexedRoot, registeredKeys, platform));
+    const entry = await classifyIndexedRoot(indexedRoot, { ...options, registeredRoots });
+    collected.push({ entry, index: indexedRoot.index });
   }
-
+  const entries = mergeDiscoveredEntries(collected);
+  const workspaces = entries.filter((entry): entry is CodexWorkspace => entry.kind === 'workspace');
+  const directProjects = entries.filter(
+    (entry): entry is CodexDirectProject => entry.kind === 'direct-project',
+  );
+  const directOpenSpecProjects = directProjects.filter(
+    (entry) => entry.status === 'available' || entry.status === 'already-added',
+  );
+  const truncationReasons = parsedIndex.truncationReasons;
   return codexProjectListSchema.parse({
-    candidates,
+    entries,
     summary: {
       source,
-      candidateCount: candidates.length,
-      availableCount: candidates.filter((candidate) => candidate.status === 'available').length,
-      truncated: parsedIndex.truncated,
+      indexedRootCount: parsedIndex.indexedRootCount,
+      workspaceCount: workspaces.length,
+      repositoryCount:
+        directOpenSpecProjects.length +
+        workspaces.reduce((count, workspace) => count + workspace.repositoryCount, 0),
+      openSpecProjectCount:
+        directOpenSpecProjects.length +
+        workspaces.reduce((count, workspace) => count + workspace.openSpecProjectCount, 0),
+      availableCount:
+        directProjects.filter((entry) => entry.status === 'available').length +
+        workspaces.reduce((count, workspace) => count + workspace.availableCount, 0),
+      truncated: truncationReasons.length > 0,
+      truncationReasons,
       ...(source === 'backup' ? { message: '主项目索引暂不可用，已读取只读备份' } : {}),
     },
     scannedAt: new Date().toISOString(),

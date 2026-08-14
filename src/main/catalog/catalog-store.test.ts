@@ -46,6 +46,19 @@ function createV1Catalog() {
   };
 }
 
+function createV2Catalog() {
+  const legacy = createV1Catalog();
+  return {
+    ...legacy,
+    schemaVersion: 2 as const,
+    projects: legacy.projects.map((project) => ({
+      ...project,
+      versionMode: project.versionLabel ? ('manual' as const) : ('automatic' as const),
+      versionSource: project.versionLabel ? ('manual' as const) : ('workspace' as const),
+    })),
+  };
+}
+
 describe('CatalogStore', () => {
   it('writes validated state atomically and reloads it', async () => {
     const userData = await fs.mkdtemp(join(tmpdir(), 'openspec-catalog-'));
@@ -56,7 +69,7 @@ describe('CatalogStore', () => {
       await store.save(state);
       const loaded = await store.load();
       expect(loaded.state.preferences.showArchived).toBe(true);
-      expect(loaded.state.schemaVersion).toBe(2);
+      expect(loaded.state.schemaVersion).toBe(3);
       expect((await fs.readdir(userData)).some((name) => name.includes('.tmp-'))).toBe(false);
     } finally {
       await fs.rm(userData, { recursive: true, force: true });
@@ -69,7 +82,7 @@ describe('CatalogStore', () => {
       await fs.writeFile(join(userData, 'catalog.json'), '{not-json');
       const result = await new CatalogStore(userData).load();
       expect(result.recoveredFromCorruption).toBe(true);
-      expect(result.state.schemaVersion).toBe(2);
+      expect(result.state.schemaVersion).toBe(3);
       expect(
         (await fs.readdir(userData)).some((name) => name.startsWith('catalog.json.corrupt-')),
       ).toBe(true);
@@ -91,8 +104,8 @@ describe('CatalogStore', () => {
       expect(result.recoveredFromCorruption).toBe(false);
       expect(result.recoveryMessage).toContain('v1');
       expect(result.state).toMatchObject({
-        schemaVersion: 2,
-        groups: [{ id: 'group-1', name: '产品组', order: 0 }],
+        schemaVersion: 3,
+        groups: [{ id: 'group-1', name: '产品组', order: 0, kind: 'manual' }],
         preferences: {
           selectedProjectId: 'project-manual',
           selectedChangeId: 'change-1',
@@ -122,6 +135,73 @@ describe('CatalogStore', () => {
         result.state,
       );
     } finally {
+      await fs.rm(userData, { recursive: true, force: true });
+    }
+  });
+
+  it('backs up and migrates v2 groups to v3 without changing identities or preferences', async () => {
+    const userData = await fs.mkdtemp(join(tmpdir(), 'openspec-migrate-v2-'));
+    try {
+      const original = createV2Catalog();
+      await fs.writeFile(join(userData, 'catalog.json'), `${JSON.stringify(original, null, 2)}\n`);
+
+      const result = await new CatalogStore(userData).load();
+
+      expect(result.recoveredFromCorruption).toBe(false);
+      expect(result.recoveryMessage).toContain('v2');
+      expect(result.state).toMatchObject({
+        schemaVersion: 3,
+        groups: [{ ...original.groups[0], kind: 'manual' }],
+        projects: original.projects,
+        preferences: original.preferences,
+      });
+      expect(
+        (await fs.readdir(userData)).some((name) => name.startsWith('catalog.json.v2-backup-')),
+      ).toBe(true);
+    } finally {
+      await fs.rm(userData, { recursive: true, force: true });
+    }
+  });
+
+  it('moves a malformed v3 catalog aside and recovers a clean v3 state', async () => {
+    const userData = await fs.mkdtemp(join(tmpdir(), 'openspec-corrupt-v3-'));
+    try {
+      await fs.writeFile(
+        join(userData, 'catalog.json'),
+        JSON.stringify({ ...createV2Catalog(), schemaVersion: 3 }),
+      );
+
+      const result = await new CatalogStore(userData).load();
+
+      expect(result.recoveredFromCorruption).toBe(true);
+      expect(result.state).toEqual(createDefaultCatalogState());
+      expect(
+        (await fs.readdir(userData)).some((name) => name.startsWith('catalog.json.corrupt-')),
+      ).toBe(true);
+    } finally {
+      await fs.rm(userData, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a recognizable v2 catalog untouched when its migration backup fails', async () => {
+    const userData = await fs.mkdtemp(join(tmpdir(), 'openspec-migrate-v2-backup-failure-'));
+    const catalogPath = join(userData, 'catalog.json');
+    const original = `${JSON.stringify(createV2Catalog(), null, 2)}\n`;
+    try {
+      await fs.writeFile(catalogPath, original);
+      vi.spyOn(fs, 'copyFile').mockRejectedValueOnce(new Error('备份卷不可写'));
+
+      const result = await new CatalogStore(userData).load();
+
+      expect(result.recoveredFromCorruption).toBe(true);
+      expect(result.recoveryMessage).toContain('迁移失败');
+      expect(result.state).toEqual(createDefaultCatalogState());
+      expect(await fs.readFile(catalogPath, 'utf8')).toBe(original);
+      expect(
+        (await fs.readdir(userData)).some((name) => name.startsWith('catalog.json.corrupt-')),
+      ).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
       await fs.rm(userData, { recursive: true, force: true });
     }
   });

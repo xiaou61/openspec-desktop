@@ -1,0 +1,90 @@
+:root {
+  --surface-canvas: #eceeef;
+  --surface-sidebar: rgb(247 248 249 / 94%);
+  --surface-list: #fbfbfc;
+  --surface-content: #ffffff;
+  --surface-subtle: #f5f6f7;
+  --surface-hover: #f2f3f4;
+  --surface-selected: #ffffff;
+  --surface-overlay: rgb(255 255 255 / 94%);
+
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-tertiary: #71717a;
+  --text-disabled: #a1a1aa;
+
+  --border-soft: rgb(24 24 27 / 8%);
+  --border-default: rgb(24 24 27 / 13%);
+  --border-strong: rgb(24 24 27 / 22%);
+  --focus-ring: #0875d1;
+
+  --state-success: #19745a;
+  --state-success-surface: #eaf7f1;
+  --state-warning: #895b00;
+  --state-warning-surface: #fff5d9;
+  --state-danger: #b8322d;
+  --state-danger-surface: #fff0ef;
+  --state-info: #0967a8;
+  --state-info-surface: #edf6ff;
+
+  --font-caption: 10px;
+  --font-control: 11px;
+  --font-body: 13px;
+  --font-panel-title: 18px;
+  --font-detail-title: 22px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  --radius-control: 5px;
+  --radius-panel: 7px;
+  --control-height-compact: 30px;
+  --control-height-default: 32px;
+
+  --elevation-menu: 0 16px 40px rgb(24 24 27 / 14%), 0 2px 7px rgb(24 24 27 / 7%);
+  --elevation-dialog: 0 28px 80px rgb(24 24 27 / 20%), 0 3px 12px rgb(24 24 27 / 8%);
+
+  --duration-press: 120ms;
+  --duration-select: 140ms;
+  --duration-state: 200ms;
+  --duration-disclosure: 220ms;
+  --duration-overlay: 240ms;
+  --duration-exit: 160ms;
+  --ease-interface-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-interface-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --canvas: var(--surface-canvas);
+  --panel: var(--surface-content);
+  --panel-subtle: var(--surface-list);
+  --panel-raised: var(--surface-content);
+  --glass: rgb(248 249 250 / 82%);
+  --glass-strong: var(--surface-overlay);
+  --ink: var(--text-primary);
+  --ink-soft: var(--text-secondary);
+  --muted: var(--text-secondary);
+  --muted-light: var(--text-tertiary);
+  --line: var(--border-soft);
+  --line-strong: var(--border-default);
+  --hover: var(--surface-hover);
+  --selected: var(--surface-selected);
+  --focus: var(--focus-ring);
+  --success: var(--state-success);
+  --warning: var(--state-warning);
+  --danger: var(--state-danger);
+  --info: var(--state-info);
+  --radius-sm: var(--radius-control);
+  --radius: var(--radius-panel);
+  --control-height: var(--control-height-default);
+  --shadow-menu: var(--elevation-menu);
+  --shadow-dialog: var(--elevation-dialog);
+  --motion-press: var(--duration-press);
+  --motion-fast: var(--duration-exit);
+  --motion-standard: var(--duration-state);
+  --motion-overlay: var(--duration-overlay);
+  --ease-out-ui: var(--ease-interface-out);
+  --ease-in-out-ui: var(--ease-interface-in-out);
+}

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { VersionMode, VersionSource } from '@shared/contracts';
+import { auditChildProcessInvocation } from './child-process-audit';
 
 const execFile = promisify(execFileCallback);
 
@@ -56,7 +57,9 @@ function hasControlCharacters(value: string): boolean {
 }
 
 function defaultRunGit(rootPath: string, options: GitExecutionOptions): Promise<string> {
-  return execFile('git', ['tag', '--points-at', 'HEAD', '--sort=-version:refname'], {
+  const args = ['tag', '--points-at', 'HEAD', '--sort=-version:refname'];
+  auditChildProcessInvocation('git', args, rootPath);
+  return execFile('git', args, {
     cwd: rootPath,
     shell: false,
     timeout: options.timeoutMs,

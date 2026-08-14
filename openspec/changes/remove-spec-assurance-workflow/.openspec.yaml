@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-08-12
+skip_specs: true
+goal: Delete assurance UI, evidence, reports, conflicts, persistence, and
+  lifecycle coupling while retaining strict validation and independent Change
+  collision insights

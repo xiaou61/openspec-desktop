@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import type { CodexProjectList } from '@shared/contracts';
 import { AppController } from './app-controller';
 import { CatalogService } from './catalog/catalog-service';
 import { CatalogStore } from './catalog/catalog-store';
@@ -67,10 +68,11 @@ describe('AppController Codex import', () => {
       await controller.initialize();
 
       const listed = await controller.listCodexProjects();
-      expect(listed.candidates.map((candidate) => candidate.status)).toEqual([
-        'available',
-        'missing',
-      ]);
+      expect(
+        listed.entries.map((candidate) =>
+          candidate.kind === 'direct-project' ? candidate.status : candidate.kind,
+        ),
+      ).toEqual(['available', 'unavailable']);
       const imported = await controller.importCodexProjects({
         projects: [
           { rootPath: valid, displayName: '由渲染进程提供的名称' },
@@ -122,6 +124,169 @@ describe('AppController Codex import', () => {
         error: '该目录不在当前 Codex 项目索引中',
       });
       expect(result.snapshot.catalog.projects).toEqual([]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('imports a workspace leaf into a persistent source group without registering its parent', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'app-controller-workspace-'));
+    try {
+      const codexHome = join(root, '.codex');
+      const userDataPath = join(root, 'user-data');
+      const workspaceRoot = join(root, 'Demo');
+      await fs.mkdir(workspaceRoot);
+      const projectRoot = await makeOpenSpecProject(workspaceRoot, 'frontend');
+      await fs.mkdir(join(workspaceRoot, 'backend', '.git'), { recursive: true });
+      await fs.mkdir(codexHome);
+      await fs.writeFile(
+        join(codexHome, '.codex-global-state.json'),
+        JSON.stringify({ 'electron-saved-workspace-roots': [workspaceRoot] }),
+      );
+      const catalog = new CatalogService(new CatalogStore(userDataPath));
+      const controller = new AppController({
+        userDataPath,
+        userHome: root,
+        codexHome,
+        catalog,
+        watchers: watcherStub(),
+      });
+      await controller.initialize();
+
+      const discovered = await controller.listCodexProjects();
+      const workspace = discovered.entries[0];
+      if (!workspace || workspace.kind !== 'workspace') throw new Error('expected workspace');
+      const member = workspace.members.find((entry) => entry.kind === 'openspec-project');
+      if (!member) throw new Error('expected OpenSpec member');
+      const result = await controller.importCodexProjects({
+        projects: [
+          {
+            rootPath: member.rootPath,
+            displayName: member.displayName,
+            workspace: {
+              id: workspace.id,
+              rootPath: workspace.rootPath,
+              displayName: workspace.displayName,
+            },
+          },
+        ],
+      });
+
+      expect(result.items[0]).toMatchObject({
+        status: 'imported',
+        rootPath: projectRoot,
+        workspace: { id: workspace.id, rootPath: workspaceRoot },
+      });
+      expect(result.items[0]?.workspaceGroupId).toBeTruthy();
+      expect(result.snapshot.catalog.projects.map((project) => project.rootPath)).toEqual([
+        projectRoot,
+      ]);
+      expect(result.snapshot.catalog.groups).toMatchObject([
+        { kind: 'codex-workspace', sourceRootPath: workspaceRoot },
+      ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects forged workspace ancestry and revalidates OpenSpec at confirmation time', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'app-controller-workspace-forged-'));
+    try {
+      const userDataPath = join(root, 'user-data');
+      const workspaceRoot = join(root, 'workspace');
+      const outsideRoot = await makeOpenSpecProject(root, 'outside');
+      await fs.mkdir(workspaceRoot);
+      const discovered: CodexProjectList = {
+        entries: [
+          {
+            kind: 'workspace',
+            id: 'workspace-1',
+            displayName: 'Workspace',
+            rootPath: workspaceRoot,
+            source: 'saved-workspace',
+            members: [
+              {
+                kind: 'openspec-project',
+                id: 'outside-project',
+                displayName: 'Outside',
+                rootPath: outsideRoot,
+                status: 'available',
+              },
+            ],
+            diagnostics: [],
+            truncated: false,
+            truncationReasons: [],
+            repositoryCount: 1,
+            openSpecProjectCount: 1,
+            availableCount: 1,
+          },
+        ],
+        summary: {
+          source: 'primary',
+          indexedRootCount: 1,
+          workspaceCount: 1,
+          repositoryCount: 1,
+          openSpecProjectCount: 1,
+          availableCount: 1,
+          truncated: false,
+          truncationReasons: [],
+        },
+        scannedAt: new Date().toISOString(),
+      };
+      const catalog = new CatalogService(new CatalogStore(userDataPath));
+      const controller = new AppController({
+        userDataPath,
+        catalog,
+        watchers: watcherStub(),
+        codexDiscovery: vi.fn().mockResolvedValue(discovered),
+      });
+      await controller.initialize();
+      const workspace = {
+        id: 'workspace-1',
+        rootPath: workspaceRoot,
+        displayName: 'Workspace',
+      };
+
+      const escaped = await controller.importCodexProjects({
+        projects: [{ rootPath: outsideRoot, displayName: 'Outside', workspace }],
+      });
+      expect(escaped.items[0]).toMatchObject({
+        status: 'failed',
+        error: '子项目不在声明的工作区内',
+      });
+      expect(escaped.snapshot.catalog.groups).toEqual([]);
+
+      const insideRoot = await makeOpenSpecProject(workspaceRoot, 'inside');
+      discovered.entries[0] = {
+        kind: 'workspace',
+        id: 'workspace-1',
+        displayName: 'Workspace',
+        rootPath: workspaceRoot,
+        source: 'saved-workspace',
+        members: [
+          {
+            kind: 'openspec-project',
+            id: 'inside-project',
+            displayName: 'Inside',
+            rootPath: insideRoot,
+            status: 'available',
+          },
+        ],
+        diagnostics: [],
+        truncated: false,
+        truncationReasons: [],
+        repositoryCount: 1,
+        openSpecProjectCount: 1,
+        availableCount: 1,
+      };
+      await fs.rm(join(insideRoot, 'openspec'), { recursive: true, force: true });
+      const stale = await controller.importCodexProjects({
+        projects: [{ rootPath: insideRoot, displayName: 'Inside', workspace }],
+      });
+      expect(stale.items[0]).toMatchObject({ status: 'failed' });
+      expect(stale.items[0]?.error).toContain('openspec');
+      expect(stale.snapshot.catalog.projects).toEqual([]);
+      expect(stale.snapshot.catalog.groups).toEqual([]);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

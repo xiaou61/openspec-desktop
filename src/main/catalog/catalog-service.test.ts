@@ -71,4 +71,109 @@ describe('CatalogService', () => {
       await fs.rm(invalid, { recursive: true, force: true });
     }
   });
+
+  it('creates and reuses a source-identified workspace group after successful registration', async () => {
+    const userData = await fs.mkdtemp(join(tmpdir(), 'openspec-service-workspace-'));
+    const firstRoot = await projectFixture('openspec-workspace-first-');
+    const secondRoot = await projectFixture('openspec-workspace-second-');
+    const workspaceRoot = join(userData, 'workspace-root');
+    try {
+      const service = new CatalogService(new CatalogStore(userData));
+      const first = await service.registerProjectInWorkspace(firstRoot, {
+        sourceRootPath: workspaceRoot,
+        displayName: 'Workspace',
+      });
+      expect(first.group.kind).toBe('codex-workspace');
+      expect(first.project.groupId).toBe(first.group.id);
+      await service.updateGroup(first.group.id, { name: 'Renamed workspace' });
+
+      const second = await service.registerProjectInWorkspace(secondRoot, {
+        sourceRootPath: `${workspaceRoot}${process.platform === 'win32' ? '\\' : '/'}`,
+        displayName: 'Workspace from refresh',
+      });
+      expect(second.group.id).toBe(first.group.id);
+      expect(second.group.name).toBe('Renamed workspace');
+      expect(service.snapshot().groups).toHaveLength(1);
+      expect(service.snapshot().projects.map((project) => project.groupId)).toEqual([
+        first.group.id,
+        first.group.id,
+      ]);
+    } finally {
+      await fs.rm(userData, { recursive: true, force: true });
+      await fs.rm(firstRoot, { recursive: true, force: true });
+      await fs.rm(secondRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not reuse a same-named manual group and does not leave an empty group on failure', async () => {
+    const userData = await fs.mkdtemp(join(tmpdir(), 'openspec-service-workspace-manual-'));
+    const root = await projectFixture('openspec-workspace-manual-project-');
+    const workspaceRoot = join(userData, 'workspace-root');
+    try {
+      const service = new CatalogService(new CatalogStore(userData));
+      const manual = await service.createGroup('Workspace');
+      await expect(
+        service.registerProjectInWorkspace(join(userData, 'missing'), {
+          sourceRootPath: workspaceRoot,
+          displayName: 'Workspace',
+        }),
+      ).rejects.toBeInstanceOf(CatalogValidationError);
+      expect(service.snapshot().groups).toHaveLength(1);
+      const imported = await service.registerProjectInWorkspace(root, {
+        sourceRootPath: workspaceRoot,
+        displayName: 'Workspace',
+      });
+      expect(imported.group.kind).toBe('codex-workspace');
+      expect(imported.group.id).not.toBe(manual.id);
+      expect(service.snapshot().groups).toHaveLength(2);
+    } finally {
+      await fs.rm(userData, { recursive: true, force: true });
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes concurrent workspace registrations and preserves an existing project group', async () => {
+    const userData = await fs.mkdtemp(join(tmpdir(), 'openspec-service-workspace-concurrent-'));
+    const firstRoot = await projectFixture('openspec-workspace-concurrent-first-');
+    const secondRoot = await projectFixture('openspec-workspace-concurrent-second-');
+    const thirdRoot = await projectFixture('openspec-workspace-concurrent-third-');
+    const workspaceRoot = join(userData, 'workspace-root');
+    try {
+      const service = new CatalogService(new CatalogStore(userData));
+      const manual = await service.createGroup('Manual');
+      const existing = await service.registerProject(thirdRoot, { groupId: manual.id });
+      await expect(
+        service.registerProjectInWorkspace(thirdRoot, {
+          sourceRootPath: workspaceRoot,
+          displayName: 'Workspace',
+        }),
+      ).rejects.toBeInstanceOf(CatalogValidationError);
+      expect(service.getProject(existing.id).groupId).toBe(manual.id);
+
+      const results = await Promise.all([
+        service.registerProjectInWorkspace(firstRoot, {
+          sourceRootPath: workspaceRoot,
+          displayName: 'Workspace',
+        }),
+        service.registerProjectInWorkspace(secondRoot, {
+          sourceRootPath: workspaceRoot,
+          displayName: 'Workspace',
+        }),
+      ]);
+      expect(new Set(results.map((result) => result.group.id)).size).toBe(1);
+      expect(
+        service.snapshot().groups.filter((group) => group.kind === 'codex-workspace'),
+      ).toHaveLength(1);
+      const workspaceGroup = results[0].group;
+      await service.removeGroup(workspaceGroup.id);
+      expect(
+        service.snapshot().projects.filter((project) => project.groupId === workspaceGroup.id),
+      ).toHaveLength(0);
+    } finally {
+      await fs.rm(userData, { recursive: true, force: true });
+      await fs.rm(firstRoot, { recursive: true, force: true });
+      await fs.rm(secondRoot, { recursive: true, force: true });
+      await fs.rm(thirdRoot, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,20 +1,31 @@
 import { promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
-import { dialog, shell } from 'electron';
+import { clipboard, dialog, shell } from 'electron';
 import {
   appSnapshotSchema,
+  type ActionCenterSnapshot,
+  changeLifecycleAssessmentSchema,
   codexImportResultSchema,
   projectionEventSchema,
   type AppSnapshot,
   type CodexImportResult,
+  type CodexDirectProject,
+  type CodexOpenSpecWorkspaceMember,
   type CodexProjectList,
+  type CodexWorkspaceReference,
+  type ChangeLifecycleAssessment,
+  type CodexHandoff,
   type ProjectionEvent,
+  type ProjectionUpdateDomain,
   type ProjectRecord,
   type VersionSource,
   type WatcherState,
 } from '@shared/contracts';
 import type {
+  ActionCenterRequest,
+  BuildCodexHandoffRequest,
   ClearHistoryRequest,
+  ChangeLifecycleRequest,
   CodexImportProjectsRequest,
   CompareRevisionsRequest,
   CreateGroupRequest,
@@ -23,6 +34,7 @@ import type {
   HistoryRevisionListRequest,
   RefreshVersionRequest,
   RegisterProjectRequest,
+  RunChangeValidationRequest,
   RelocateProjectRequest,
   SelectRelocationRequest,
   RevealArtifactRequest,
@@ -31,11 +43,19 @@ import type {
   UpdateProjectRequest,
   VersionSummaryListRequest,
 } from '@shared/ipc-contracts';
-import { resolveRegisteredArtifactPath, isPathWithin } from './domain/paths';
+import {
+  resolveRegisteredArtifactPath,
+  isPathWithin,
+  normalizeProjectRoot,
+  validateOpenSpecProject,
+} from './domain/paths';
 import type { ProjectScanResult } from './domain/scanner';
 import { assertAllowedExternalUrl } from './security/url';
 import type { CatalogService } from './catalog/catalog-service';
-import { selectOpenSpecProjectDirectory, type DirectoryDialog } from './catalog/directory-picker';
+import {
+  selectOpenSpecProjectDirectory,
+  type DirectoryDialog,
+} from './catalog/directory-picker';
 import { HistoryStore } from './history/history-store';
 import { toProjectSnapshot } from './projection';
 import type { WatcherProjection } from './watcher/project-watcher';
@@ -45,6 +65,11 @@ import {
   discoverCodexProjects,
   type DiscoverCodexProjectsOptions,
 } from './codex/codex-project-discovery';
+import { LifecycleService, type LifecycleContext } from './lifecycle/lifecycle-service';
+import { RestrictedOpenSpecCli } from './lifecycle/openspec-cli';
+import { ActionCenterService } from './action-center/action-center-service';
+import { ChangeWorkStateService } from './work-state/change-work-state-service';
+import { ChangeWorkStateStore } from './work-state/change-work-state-store';
 
 export const PROJECTION_EVENT_CHANNEL = 'projection:updated';
 
@@ -63,7 +88,13 @@ export interface AppControllerOptions {
   watchers: WatcherManager;
   directoryDialog?: DirectoryDialog;
   fileShell?: Pick<typeof shell, 'showItemInFolder' | 'openPath' | 'openExternal'>;
+  clipboardWriter?: Pick<typeof clipboard, 'writeText'>;
   codexDiscovery?: (options: DiscoverCodexProjectsOptions) => Promise<CodexProjectList>;
+  lifecycle?: LifecycleService;
+  workStateStore?: ChangeWorkStateStore;
+  actionCenter?: ActionCenterService;
+  openSpecCli?: RestrictedOpenSpecCli;
+  now?: () => Date;
 }
 
 function emptyProjectScan(project: ProjectRecord): ProjectScanResult {
@@ -84,19 +115,51 @@ export class AppController {
   private readonly scans = new Map<string, ProjectScanResult>();
   private readonly directoryDialog: DirectoryDialog;
   private readonly fileShell: Pick<typeof shell, 'showItemInFolder' | 'openPath' | 'openExternal'>;
+  private readonly clipboardWriter: Pick<typeof clipboard, 'writeText'>;
   private readonly codexDiscovery: (
     options: DiscoverCodexProjectsOptions,
   ) => Promise<CodexProjectList>;
+  private readonly lifecycle: LifecycleService;
+  private readonly workStateStore: ChangeWorkStateStore;
+  private readonly workStates: ChangeWorkStateService;
+  private readonly actionCenter: ActionCenterService;
+  private readonly now: () => Date;
 
   constructor(private readonly options: AppControllerOptions) {
     this.directoryDialog = options.directoryDialog ?? dialog;
     this.fileShell = options.fileShell ?? shell;
+    this.clipboardWriter = options.clipboardWriter ?? clipboard;
     this.codexDiscovery = options.codexDiscovery ?? discoverCodexProjects;
+    this.now = options.now ?? (() => new Date());
+    const openSpecCli = options.openSpecCli ?? new RestrictedOpenSpecCli();
+    this.lifecycle =
+      options.lifecycle ??
+      new LifecycleService({
+        userDataPath: options.userDataPath,
+        cli: openSpecCli,
+      });
+    this.workStateStore = options.workStateStore ?? new ChangeWorkStateStore(options.userDataPath);
+    this.workStates = new ChangeWorkStateService({
+      store: this.workStateStore,
+      lifecycle: this.lifecycle,
+      historyForProject: (projectId) => this.ensureHistory(projectId),
+    });
+    this.actionCenter =
+      options.actionCenter ??
+      new ActionCenterService({
+        catalog: options.catalog,
+        getScan: (projectId) =>
+          this.scans.get(projectId) ?? options.watchers.getSnapshot?.(projectId) ?? null,
+        lifecycle: this.lifecycle,
+        cli: openSpecCli,
+        workStateStore: this.workStateStore,
+      });
   }
 
   async initialize(): Promise<void> {
     await this.options.catalog.init();
     const projects = this.options.catalog.snapshot().projects;
+    await Promise.all(projects.map((project) => this.workStateStore.initProject(project.id)));
     await Promise.all(
       projects
         .filter((project) => project.watcherEnabled)
@@ -115,9 +178,19 @@ export class AppController {
 
   getAppSnapshot(): AppSnapshot {
     const catalog = this.options.catalog.snapshot();
-    const projects = catalog.projects.map((project) =>
-      toProjectSnapshot(project, catalog, this.scans.get(project.id) ?? emptyProjectScan(project)),
-    );
+    const projects = catalog.projects.map((project) => {
+      const snapshot = toProjectSnapshot(
+        project,
+        catalog,
+        this.withWorkState(project.id, this.scans.get(project.id) ?? emptyProjectScan(project)),
+      );
+      try {
+        const diagnostic = this.workStateStore.snapshot(project.id).diagnostic;
+        return { ...snapshot, ...(diagnostic ? { workStateDiagnostic: diagnostic } : {}) };
+      } catch {
+        return snapshot;
+      }
+    });
     return appSnapshotSchema.parse({ catalog, projects });
   }
 
@@ -149,12 +222,25 @@ export class AppController {
 
   async importCodexProjects(request: CodexImportProjectsRequest): Promise<CodexImportResult> {
     const discovered = await this.listCodexProjects();
-    const candidates = new Map(
-      discovered.candidates.map((candidate) => [
-        codexProjectPathKey(candidate.rootPath),
-        candidate,
-      ]),
-    );
+    type ImportCandidate = (CodexDirectProject | CodexOpenSpecWorkspaceMember) & {
+      workspace?: CodexWorkspaceReference;
+    };
+    const candidates = new Map<string, ImportCandidate>();
+    for (const entry of discovered.entries) {
+      if (entry.kind === 'direct-project') {
+        candidates.set(codexProjectPathKey(entry.rootPath), entry);
+        continue;
+      }
+      const workspace: CodexWorkspaceReference = {
+        id: entry.id,
+        rootPath: entry.rootPath,
+        displayName: entry.displayName,
+      };
+      for (const member of entry.members) {
+        if (member.kind !== 'openspec-project') continue;
+        candidates.set(codexProjectPathKey(member.rootPath), { ...member, workspace });
+      }
+    }
     const items: CodexImportResult['items'] = [];
 
     for (const requestedProject of request.projects) {
@@ -169,17 +255,63 @@ export class AppController {
         });
         continue;
       }
+      const candidateWorkspace = candidate.workspace;
+      const requestedWorkspace = requestedProject.workspace;
+      const workspaceMatches =
+        (!candidateWorkspace && !requestedWorkspace) ||
+        (candidateWorkspace !== undefined &&
+          requestedWorkspace !== undefined &&
+          candidateWorkspace.id === requestedWorkspace.id &&
+          codexProjectPathKey(candidateWorkspace.rootPath) ===
+            codexProjectPathKey(requestedWorkspace.rootPath));
+      if (!workspaceMatches) {
+        items.push({
+          rootPath: candidate.rootPath,
+          displayName,
+          status: 'failed',
+          ...(candidateWorkspace ? { workspace: candidateWorkspace } : {}),
+          error: '工作区来源与当前发现结果不一致',
+        });
+        continue;
+      }
+      const normalizedRootPath = normalizeProjectRoot(candidate.rootPath);
+      if (
+        candidateWorkspace &&
+        (codexProjectPathKey(candidateWorkspace.rootPath) ===
+          codexProjectPathKey(normalizedRootPath) ||
+          !isPathWithin(candidateWorkspace.rootPath, normalizedRootPath))
+      ) {
+        items.push({
+          rootPath: normalizedRootPath,
+          displayName,
+          status: 'failed',
+          workspace: candidateWorkspace,
+          error: '子项目不在声明的工作区内',
+        });
+        continue;
+      }
       if (candidate.status === 'already-added') {
-        const existing = this.options.catalog
-          .snapshot()
-          .projects.find(
-            (project) =>
-              codexProjectPathKey(project.rootPath) === codexProjectPathKey(candidate.rootPath),
-          );
+        const catalog = this.options.catalog.snapshot();
+        const existing = catalog.projects.find(
+          (project) =>
+            codexProjectPathKey(project.rootPath) === codexProjectPathKey(candidate.rootPath),
+        );
+        const associatedWorkspaceGroup =
+          candidateWorkspace && existing?.groupId
+            ? catalog.groups.find(
+                (group) =>
+                  group.id === existing.groupId &&
+                  group.kind === 'codex-workspace' &&
+                  codexProjectPathKey(group.sourceRootPath) ===
+                    codexProjectPathKey(candidateWorkspace.rootPath),
+              )
+            : undefined;
         items.push({
           rootPath: candidate.rootPath,
           displayName,
           status: 'already-added',
+          ...(candidateWorkspace ? { workspace: candidateWorkspace } : {}),
+          ...(associatedWorkspaceGroup ? { workspaceGroupId: associatedWorkspaceGroup.id } : {}),
           ...(existing ? { projectId: existing.id } : {}),
         });
         continue;
@@ -189,40 +321,74 @@ export class AppController {
           rootPath: candidate.rootPath,
           displayName,
           status: 'failed',
+          ...(candidateWorkspace ? { workspace: candidateWorkspace } : {}),
           error: candidate.reason ?? '该项目当前不可导入',
         });
         continue;
       }
-      try {
-        const project = await this.options.catalog.registerProject(candidate.rootPath, {
+      const validation = await validateOpenSpecProject(normalizedRootPath);
+      if (!validation.valid) {
+        items.push({
+          rootPath: normalizedRootPath,
           displayName,
-          versionMode: 'automatic',
+          status: 'failed',
+          ...(candidateWorkspace ? { workspace: candidateWorkspace } : {}),
+          error: validation.reason ?? '确认导入时 OpenSpec 项目已失效',
         });
+        continue;
+      }
+      try {
+        const workspaceRegistration = candidateWorkspace
+          ? await this.options.catalog.registerProjectInWorkspace(normalizedRootPath, {
+              sourceRootPath: candidateWorkspace.rootPath,
+              displayName: candidateWorkspace.displayName,
+            })
+          : null;
+        const project = workspaceRegistration
+          ? workspaceRegistration.project
+          : await this.options.catalog.registerProject(normalizedRootPath, {
+              displayName,
+              versionMode: 'automatic',
+            });
         items.push({
           rootPath: project.rootPath,
           displayName: project.displayName,
           status: 'imported',
           projectId: project.id,
+          ...(candidateWorkspace ? { workspace: candidateWorkspace } : {}),
+          ...(workspaceRegistration ? { workspaceGroupId: workspaceRegistration.group.id } : {}),
         });
       } catch (error) {
-        const existing = this.options.catalog
-          .snapshot()
-          .projects.find(
-            (project) =>
-              codexProjectPathKey(project.rootPath) === codexProjectPathKey(candidate.rootPath),
-          );
+        const catalog = this.options.catalog.snapshot();
+        const existing = catalog.projects.find(
+          (project) =>
+            codexProjectPathKey(project.rootPath) === codexProjectPathKey(candidate.rootPath),
+        );
         if (existing) {
+          const associatedWorkspaceGroup =
+            candidateWorkspace && existing.groupId
+              ? catalog.groups.find(
+                  (group) =>
+                    group.id === existing.groupId &&
+                    group.kind === 'codex-workspace' &&
+                    codexProjectPathKey(group.sourceRootPath) ===
+                      codexProjectPathKey(candidateWorkspace.rootPath),
+                )
+              : undefined;
           items.push({
             rootPath: existing.rootPath,
             displayName: existing.displayName,
             status: 'already-added',
             projectId: existing.id,
+            ...(candidateWorkspace ? { workspace: candidateWorkspace } : {}),
+            ...(associatedWorkspaceGroup ? { workspaceGroupId: associatedWorkspaceGroup.id } : {}),
           });
         } else {
           items.push({
             rootPath: candidate.rootPath,
             displayName,
             status: 'failed',
+            ...(candidateWorkspace ? { workspace: candidateWorkspace } : {}),
             error: error instanceof Error ? error.message.slice(0, 500) : '项目导入失败',
           });
         }
@@ -265,6 +431,7 @@ export class AppController {
       await this.options.watchers.startProject(after);
     this.options.watchers.updateProjectContext(after);
     if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
+    this.actionCenter.invalidate(request.projectId);
     return this.getAppSnapshot();
   }
 
@@ -272,6 +439,8 @@ export class AppController {
     const before = structuredClone(this.options.catalog.getProject(request.projectId));
     await this.options.catalog.relocateProject(request.projectId, request.rootPath);
     this.scans.delete(request.projectId);
+    this.lifecycle.invalidate(request.projectId);
+    this.actionCenter.invalidate();
     const after = this.options.catalog.getProject(request.projectId);
     this.options.watchers.updateProjectContext(after);
     if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
@@ -284,6 +453,8 @@ export class AppController {
     const before = structuredClone(this.options.catalog.getProject(request.projectId));
     await this.options.catalog.relocateProject(request.projectId, rootPath);
     this.scans.delete(request.projectId);
+    this.lifecycle.invalidate(request.projectId);
+    this.actionCenter.invalidate();
     const after = this.options.catalog.getProject(request.projectId);
     this.options.watchers.updateProjectContext(after);
     if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
@@ -293,6 +464,8 @@ export class AppController {
   async unregisterProject(projectId: string): Promise<AppSnapshot> {
     await this.options.catalog.unregisterProject(projectId);
     this.scans.delete(projectId);
+    this.lifecycle.invalidate(projectId);
+    this.actionCenter.invalidate();
     return this.getAppSnapshot();
   }
 
@@ -319,6 +492,8 @@ export class AppController {
     const after = await this.options.catalog.refreshVersion(projectId);
     this.options.watchers.updateProjectContext(after);
     if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
+    this.lifecycle.invalidate(projectId);
+    this.actionCenter.invalidate(projectId);
     await this.options.watchers.rescanProject(projectId);
     return this.getAppSnapshot();
   }
@@ -328,7 +503,75 @@ export class AppController {
     const after = await this.options.catalog.refreshVersion(request.projectId);
     this.options.watchers.updateProjectContext(after);
     if (this.versionContextChanged(before, after)) await this.recordVersionContextActivity(after);
+    this.actionCenter.invalidate(request.projectId);
     return this.getAppSnapshot();
+  }
+
+  async getChangeLifecycle(request: ChangeLifecycleRequest): Promise<ChangeLifecycleAssessment> {
+    const assessment = await this.lifecycle.getAssessment(
+      this.resolveLifecycleContext(request.projectId, request.changeId, request.archived),
+    );
+    return this.withLifecycleWorkState(
+      request.projectId,
+      request.changeId,
+      request.archived,
+      assessment,
+    );
+  }
+
+  async runChangeValidation(
+    request: RunChangeValidationRequest,
+  ): Promise<ChangeLifecycleAssessment> {
+    const context = this.resolveLifecycleContext(request.projectId, request.changeId, false);
+    const assessment = await this.lifecycle.runValidation({
+      ...context,
+      getCurrent: () => {
+        try {
+          return this.resolveLifecycleContext(request.projectId, request.changeId, false);
+        } catch {
+          return this.resolveLifecycleContext(request.projectId, request.changeId, true);
+        }
+      },
+    });
+    const result = this.withLifecycleWorkState(
+      request.projectId,
+      request.changeId,
+      false,
+      assessment,
+    );
+    this.actionCenter.invalidate(request.projectId);
+    this.publish(
+      this.makeProjectionEvent(
+        'project-updated',
+        request.projectId,
+        [request.changeId],
+        ['lifecycle', 'action-center'],
+      ),
+    );
+    return result;
+  }
+
+  async getActionCenter(request: ActionCenterRequest): Promise<ActionCenterSnapshot> {
+    return this.actionCenter.getActionCenter({
+      ...(request.projectId ? { projectId: request.projectId } : {}),
+    });
+  }
+
+  async refreshActionCenter(request: ActionCenterRequest): Promise<ActionCenterSnapshot> {
+    return this.actionCenter.getActionCenter({
+      ...(request.projectId ? { projectId: request.projectId } : {}),
+      refresh: true,
+    });
+  }
+
+  async buildCodexHandoff(request: BuildCodexHandoffRequest): Promise<CodexHandoff> {
+    return this.actionCenter.buildCodexHandoff(request);
+  }
+
+  async copyCodexHandoff(request: BuildCodexHandoffRequest): Promise<CodexHandoff> {
+    const handoff = await this.actionCenter.buildCodexHandoff(request);
+    if (!handoff.stale) this.clipboardWriter.writeText(handoff.markdown);
+    return handoff;
   }
 
   async listRevisions(request: HistoryRevisionListRequest) {
@@ -375,6 +618,9 @@ export class AppController {
     const history = await this.ensureHistory(request.projectId);
     if (request.retention) await history.setRetention(request.retention);
     await history.clearHistory();
+    await this.workStateStore.initProject(request.projectId);
+    await this.workStateStore.clearProject(request.projectId);
+    this.actionCenter.invalidate(request.projectId);
     return this.getAppSnapshot();
   }
 
@@ -427,18 +673,36 @@ export class AppController {
 
   async handleProjection(event: WatcherProjection): Promise<void> {
     this.scans.set(event.projectId, event.snapshot);
+    this.lifecycle.invalidate(
+      event.projectId,
+      event.affectedChangeIds.length > 0 ? event.affectedChangeIds : undefined,
+    );
+    const project = this.options.catalog.getProject(event.projectId);
+    const workState = await this.workStates.reconcile({ project, scan: event.snapshot });
+    this.actionCenter.invalidate(event.projectId);
     const eventPayload = this.makeProjectionEvent(
       'project-updated',
       event.projectId,
-      event.affectedChangeIds,
+      [...new Set([...event.affectedChangeIds, ...workState.changedChangeIds])],
+      ['snapshot', 'history', 'lifecycle', 'action-center'],
     );
     this.publish(eventPayload);
   }
 
   async handleWatcherState(projectId: string, state: WatcherState, error?: string): Promise<void> {
     const project = await this.options.catalog.setWatcherState(projectId, state, error);
-    if (state === 'unavailable') this.scans.delete(projectId);
-    const eventPayload = this.makeProjectionEvent('watcher-state', project.id, []);
+    if (state === 'unavailable') {
+      this.scans.delete(projectId);
+      this.lifecycle.invalidate(projectId);
+      this.actionCenter.invalidate(projectId);
+    }
+    if (state !== 'unavailable') this.actionCenter.invalidate(projectId);
+    const eventPayload = this.makeProjectionEvent(
+      'watcher-state',
+      project.id,
+      [],
+      ['snapshot', 'lifecycle', 'action-center'],
+    );
     this.publish(eventPayload);
   }
 
@@ -446,6 +710,7 @@ export class AppController {
     type: ProjectionEvent['type'],
     projectId: string,
     changeIds: string[],
+    domains?: ProjectionUpdateDomain[],
   ): ProjectionEvent {
     const snapshot = this.getAppSnapshot().projects.find(
       (project) => project.project.id === projectId,
@@ -454,6 +719,7 @@ export class AppController {
       type,
       projectId,
       changeIds: [...new Set(changeIds)],
+      ...(domains ? { domains: [...new Set(domains)] } : {}),
       emittedAt: new Date().toISOString(),
       ...(snapshot ? { snapshot } : {}),
     };
@@ -480,6 +746,67 @@ export class AppController {
     const history = new HistoryStore(this.options.userDataPath, projectId);
     await history.init();
     return history;
+  }
+
+  private withWorkState(projectId: string, scan: ProjectScanResult): ProjectScanResult {
+    let state;
+    try {
+      state = this.workStateStore.snapshot(projectId);
+    } catch {
+      return scan;
+    }
+    return {
+      ...scan,
+      changes: scan.changes.map((change) => {
+        const workState = change.archived ? state.archived[change.id] : state.active[change.id];
+        return {
+          ...change,
+          ...(workState ? { workState } : {}),
+          ...(workState?.evolution ? { evolution: workState.evolution } : {}),
+        };
+      }),
+    };
+  }
+
+  private withLifecycleWorkState(
+    projectId: string,
+    changeId: string,
+    archived: boolean,
+    assessment: ChangeLifecycleAssessment,
+  ): ChangeLifecycleAssessment {
+    let project;
+    try {
+      project = this.workStateStore.snapshot(projectId);
+    } catch {
+      return assessment;
+    }
+    const workState = archived ? project.archived[changeId] : project.active[changeId];
+    return changeLifecycleAssessmentSchema.parse({
+      ...assessment,
+      ...(workState ? { workState } : {}),
+      ...(workState?.evolution ? { evolution: workState.evolution } : {}),
+    });
+  }
+
+  private resolveLifecycleContext(
+    projectId: string,
+    changeId: string,
+    archived: boolean,
+  ): LifecycleContext {
+    const project = this.options.catalog.getProject(projectId);
+    const watcherSnapshot = this.options.watchers.getSnapshot?.(projectId) ?? null;
+    const scan = this.scans.get(projectId) ?? watcherSnapshot ?? emptyProjectScan(project);
+    const change = scan.changes.find(
+      (entry) => entry.id === changeId && entry.archived === archived,
+    );
+    if (!change) throw new Error(archived ? '已归档 Change 不存在' : '当前 Change 不存在');
+    return {
+      projectId,
+      projectRoot: project.rootPath,
+      projectAvailable: project.available,
+      scan,
+      change,
+    };
   }
 
   private versionContextChanged(before: ProjectRecord, after: ProjectRecord): boolean {
