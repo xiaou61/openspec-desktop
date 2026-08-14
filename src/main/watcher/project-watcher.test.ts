@@ -158,4 +158,47 @@ describe('ProjectWatcher', () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it('canonicalizes an aliased watch root and classifies events against the canonical path', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'openspec-watcher-canonical-'));
+    const aliasedRoot = join(tmpdir(), 'OPENSP~1', 'project');
+    const filesystemWatcher = new EventEmitter() as EventEmitter & { close: () => Promise<void> };
+    filesystemWatcher.close = vi.fn(async () => undefined);
+    const events: WatcherProjection[] = [];
+    let watchedPath = '';
+    try {
+      const tasksPath = join(root, 'openspec', 'changes', 'demo', 'tasks.md');
+      await fs.mkdir(join(root, 'openspec', 'changes', 'demo'), { recursive: true });
+      await fs.writeFile(join(root, 'openspec', 'config.yaml'), 'schema: spec-driven\n');
+      await fs.writeFile(tasksPath, '# Tasks\n- [ ] one\n');
+
+      const watcher = new ProjectWatcher({
+        project: { id: 'project-canonical', rootPath: aliasedRoot, watcherEnabled: true },
+        settleMs: 20,
+        batchMs: 20,
+        scan: (_path, options) => scanOpenSpecProject(root, options),
+        canonicalizeWatchPath: async () => join(root, 'openspec'),
+        watchFactory: ((path: string) => {
+          watchedPath = path;
+          queueMicrotask(() => filesystemWatcher.emit('ready'));
+          return filesystemWatcher;
+        }) as never,
+        onProjection: (event) => {
+          events.push(event);
+        },
+      });
+
+      await watcher.start();
+      expect(watchedPath).toBe(join(root, 'openspec'));
+      const initialCount = events.length;
+
+      await fs.writeFile(tasksPath, '# Tasks\n- [x] one\n');
+      filesystemWatcher.emit('change', tasksPath);
+      await waitFor(() => events.length > initialCount);
+      expect(events.at(-1)?.affectedChangeIds).toEqual(['demo']);
+      await watcher.close();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });

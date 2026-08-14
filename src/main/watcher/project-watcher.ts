@@ -1,3 +1,4 @@
+import { realpath } from 'node:fs/promises';
 import { relative, join } from 'node:path';
 import { watch, type FSWatcher } from 'chokidar';
 import type { ProjectRecord, WatcherState } from '@shared/contracts';
@@ -23,6 +24,7 @@ export interface ProjectWatcherOptions {
   maxFileBytes?: number;
   scan?: typeof scanOpenSpecProject;
   watchFactory?: typeof watch;
+  canonicalizeWatchPath?: (path: string) => Promise<string>;
   onProjection?: (event: WatcherProjection) => Promise<void> | void;
   onState?: (state: WatcherState, error?: string) => Promise<void> | void;
 }
@@ -37,9 +39,11 @@ export class ProjectWatcher {
   private readonly maxFileBytes: number | undefined;
   private readonly scan: typeof scanOpenSpecProject;
   private readonly watchFactory: typeof watch;
+  private readonly canonicalizeWatchPath: (path: string) => Promise<string>;
   private readonly onProjection?: ProjectWatcherOptions['onProjection'];
   private readonly onState?: ProjectWatcherOptions['onState'];
   private watcher: FSWatcher | null = null;
+  private watchedRoot: string | null = null;
   private finishWatcherReady: (() => void) | undefined;
   private pendingPaths = new Set<string>();
   private pendingUnlink = false;
@@ -61,6 +65,7 @@ export class ProjectWatcher {
     this.maxFileBytes = options.maxFileBytes;
     this.scan = options.scan ?? scanOpenSpecProject;
     this.watchFactory = options.watchFactory ?? watch;
+    this.canonicalizeWatchPath = options.canonicalizeWatchPath ?? realpath;
     this.onProjection = options.onProjection;
     this.onState = options.onState;
   }
@@ -85,6 +90,7 @@ export class ProjectWatcher {
     this.finishWatcherReady?.();
     const watcher = this.watcher;
     this.watcher = null;
+    this.watchedRoot = null;
     if (watcher) await watcher.close();
     await inFlight;
   }
@@ -189,7 +195,8 @@ export class ProjectWatcher {
 
   private async ensureWatcher(): Promise<void> {
     if (this.closed || this.watcher || !this.project.watcherEnabled) return;
-    const openspecRoot = join(this.project.rootPath, 'openspec');
+    const openspecRoot = await this.canonicalizeWatchPath(join(this.project.rootPath, 'openspec'));
+    if (this.closed || this.watcher || !this.project.watcherEnabled) return;
     const instance = this.watchFactory(openspecRoot, {
       ignoreInitial: true,
       followSymlinks: false,
@@ -206,6 +213,7 @@ export class ProjectWatcher {
       },
     });
     this.watcher = instance;
+    this.watchedRoot = openspecRoot;
     instance.on('add', (path) => this.handleFsEvent('add', path));
     instance.on('change', (path) => this.handleFsEvent('change', path));
     instance.on('unlink', (path) => this.handleFsEvent('unlink', path));
@@ -234,7 +242,8 @@ export class ProjectWatcher {
 
   private handleFsEvent(event: FsEvent, absolutePath: string): void {
     if (this.closed) return;
-    const openspecRoot = join(this.project.rootPath, 'openspec');
+    const openspecRoot = this.watchedRoot;
+    if (!openspecRoot) return;
     const relativePath = normalizeSlash(relative(openspecRoot, absolutePath));
     if (!relativePath || relativePath.startsWith('../') || relativePath === '..') return;
     if (!classifyOpenSpecPath(relativePath)) return;
