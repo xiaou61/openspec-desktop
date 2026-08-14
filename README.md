@@ -6,7 +6,19 @@ OpenSpec Desktop 是一个 Windows 优先的本地 Electron 应用。它只读�
 
 ## 快速开始
 
-本次更新通过 `main` 提供源码，不新建 GitHub Release、版本标签或安装包。仓库既有的 `v0.2.0` Release 指向旧提交 `5f8d07b`，不包含本次更新；要使用当前功能，请按下列步骤构建 `main`。请准备 Windows 10/11、Node.js 24、pnpm 11 和 Git；运行严格验证时还需要 OpenSpec CLI。
+当前稳定版为 [`v0.3.0`](https://github.com/xiaou61/openspec-desktop/releases/tag/v0.3.0)，支持 Windows 10/11 x64：
+
+- `OpenSpec-Desktop-0.3.0-Setup.exe`：安装版，可选择安装目录并创建桌面快捷方式。
+- `OpenSpec-Desktop-0.3.0-Portable.exe`：便携版，无需安装，直接运行。
+- `SHA256SUMS-v0.3.0.txt`：两个可执行文件的 SHA-256 校验值。
+
+安装包暂未使用代码签名证书，Windows SmartScreen 可能显示“未知发布者”。请只从[本仓库 Releases](https://github.com/xiaou61/openspec-desktop/releases/latest)下载，并在运行前核对 SHA-256。浏览项目不要求 OpenSpec CLI；在应用中运行严格验证时，需要本机安装兼容的 OpenSpec CLI。
+
+窗口打开后，选择左上角加号 → **选择文件夹**，添加一个自身包含可读 `openspec/` 的项目根。也可选择 **从 Codex 导入**，一次接入单项目或多项目工作区。随后在 **当前变更** 中选择 Change，通过右侧 **文档**、**任务**、**就绪**、**活动** 和 **修订** 查看只读证据；需要验证时选择 **运行严格验证**。
+
+### 从源码运行
+
+请准备 Node.js 24、pnpm 11 和 Git：
 
 ```powershell
 git clone https://github.com/xiaou61/openspec-desktop.git
@@ -15,8 +27,6 @@ pnpm install --frozen-lockfile
 pnpm build
 pnpm start
 ```
-
-窗口打开后，选择左上角加号 → **选择文件夹**，添加一个自身包含可读 `openspec/` 的项目根。也可选择 **从 Codex 导入**，一次接入单项目或多项目工作区。随后在 **当前变更** 中选择 Change，通过右侧 **文档**、**任务**、**就绪**、**活动** 和 **修订** 查看只读证据；需要验证时选择 **运行严格验证**。
 
 开发模式使用 `pnpm dev`。应用不会修改项目文件、勾选任务、归档 Change 或执行 Git 写操作；完整前置条件和操作结果请以[中文操作手册](docs/user-manual.md)为准。
 
@@ -64,4 +74,4 @@ pnpm build
 pnpm start
 ```
 
-这些命令只构建和验证当前源码，不创建或上传 GitHub Release、版本标签或安装包。完整源码启动条件见[操作手册第 1 章](docs/user-manual.md#1-适用范围与启动)。
+本地生成 Windows 安装版和便携版可运行 `pnpm package:win`；产物写入已忽略的 `release/` 目录，该命令不会自动创建标签或上传 GitHub Release。完整安装、校验与源码启动条件见[操作手册第 1 章](docs/user-manual.md#1-适用范围与启动)。
