@@ -6,7 +6,7 @@ OpenSpec Desktop 是一个 Windows 优先的本地 Electron 应用。它只读�
 
 ## 快速开始
 
-当前仓库只提供源码，不提供 GitHub Release、版本标签或安装包。请准备 Windows 10/11、Node.js 24、pnpm 11 和 Git；运行严格验证时还需要 OpenSpec CLI。
+本次更新通过 `main` 提供源码，不新建 GitHub Release、版本标签或安装包。仓库既有的 `v0.2.0` Release 指向旧提交 `5f8d07b`，不包含本次更新；要使用当前功能，请按下列步骤构建 `main`。请准备 Windows 10/11、Node.js 24、pnpm 11 和 Git；运行严格验证时还需要 OpenSpec CLI。
 
 ```powershell
 git clone https://github.com/xiaou61/openspec-desktop.git
