@@ -33,6 +33,12 @@ describe('AppController Codex import', () => {
       const codexHome = join(root, '.codex');
       const userDataPath = join(root, 'user-data');
       const valid = await makeOpenSpecProject(root, 'valid');
+      const validAlias = join(root, 'VALID~1');
+      const originalRealpath = fs.realpath.bind(fs);
+      const canonicalValid = await originalRealpath(valid);
+      vi.spyOn(fs, 'realpath').mockImplementation(async (path) =>
+        String(path) === validAlias ? canonicalValid : originalRealpath(path),
+      );
       const missing = join(root, 'missing');
       await fs.mkdir(codexHome);
       await fs.writeFile(
@@ -75,7 +81,7 @@ describe('AppController Codex import', () => {
       ).toEqual(['available', 'unavailable']);
       const imported = await controller.importCodexProjects({
         projects: [
-          { rootPath: valid, displayName: '由渲染进程提供的名称' },
+          { rootPath: validAlias, displayName: '由渲染进程提供的名称' },
           { rootPath: missing, displayName: '缺失项目' },
         ],
       });
@@ -89,11 +95,12 @@ describe('AppController Codex import', () => {
       });
 
       const duplicate = await controller.importCodexProjects({
-        projects: [{ rootPath: valid, displayName: '有效项目' }],
+        projects: [{ rootPath: validAlias, displayName: '有效项目' }],
       });
       expect(duplicate.items[0]?.status).toBe('already-added');
       expect(duplicate.snapshot.catalog.projects).toHaveLength(1);
     } finally {
+      vi.restoreAllMocks();
       await fs.rm(root, { recursive: true, force: true });
     }
   });
@@ -137,6 +144,10 @@ describe('AppController Codex import', () => {
       const workspaceRoot = join(root, 'Demo');
       await fs.mkdir(workspaceRoot);
       const projectRoot = await makeOpenSpecProject(workspaceRoot, 'frontend');
+      const [canonicalWorkspaceRoot, canonicalProjectRoot] = await Promise.all([
+        fs.realpath(workspaceRoot),
+        fs.realpath(projectRoot),
+      ]);
       await fs.mkdir(join(workspaceRoot, 'backend', '.git'), { recursive: true });
       await fs.mkdir(codexHome);
       await fs.writeFile(
@@ -174,15 +185,15 @@ describe('AppController Codex import', () => {
 
       expect(result.items[0]).toMatchObject({
         status: 'imported',
-        rootPath: projectRoot,
-        workspace: { id: workspace.id, rootPath: workspaceRoot },
+        rootPath: canonicalProjectRoot,
+        workspace: { id: workspace.id, rootPath: canonicalWorkspaceRoot },
       });
       expect(result.items[0]?.workspaceGroupId).toBeTruthy();
       expect(result.snapshot.catalog.projects.map((project) => project.rootPath)).toEqual([
-        projectRoot,
+        canonicalProjectRoot,
       ]);
       expect(result.snapshot.catalog.groups).toMatchObject([
-        { kind: 'codex-workspace', sourceRootPath: workspaceRoot },
+        { kind: 'codex-workspace', sourceRootPath: canonicalWorkspaceRoot },
       ]);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -196,20 +207,24 @@ describe('AppController Codex import', () => {
       const workspaceRoot = join(root, 'workspace');
       const outsideRoot = await makeOpenSpecProject(root, 'outside');
       await fs.mkdir(workspaceRoot);
+      const [canonicalWorkspaceRoot, canonicalOutsideRoot] = await Promise.all([
+        fs.realpath(workspaceRoot),
+        fs.realpath(outsideRoot),
+      ]);
       const discovered: CodexProjectList = {
         entries: [
           {
             kind: 'workspace',
             id: 'workspace-1',
             displayName: 'Workspace',
-            rootPath: workspaceRoot,
+            rootPath: canonicalWorkspaceRoot,
             source: 'saved-workspace',
             members: [
               {
                 kind: 'openspec-project',
                 id: 'outside-project',
                 displayName: 'Outside',
-                rootPath: outsideRoot,
+                rootPath: canonicalOutsideRoot,
                 status: 'available',
               },
             ],
@@ -257,18 +272,19 @@ describe('AppController Codex import', () => {
       expect(escaped.snapshot.catalog.groups).toEqual([]);
 
       const insideRoot = await makeOpenSpecProject(workspaceRoot, 'inside');
+      const canonicalInsideRoot = await fs.realpath(insideRoot);
       discovered.entries[0] = {
         kind: 'workspace',
         id: 'workspace-1',
         displayName: 'Workspace',
-        rootPath: workspaceRoot,
+        rootPath: canonicalWorkspaceRoot,
         source: 'saved-workspace',
         members: [
           {
             kind: 'openspec-project',
             id: 'inside-project',
             displayName: 'Inside',
-            rootPath: insideRoot,
+            rootPath: canonicalInsideRoot,
             status: 'available',
           },
         ],

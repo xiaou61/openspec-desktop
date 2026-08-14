@@ -52,15 +52,13 @@ import {
 import type { ProjectScanResult } from './domain/scanner';
 import { assertAllowedExternalUrl } from './security/url';
 import type { CatalogService } from './catalog/catalog-service';
-import {
-  selectOpenSpecProjectDirectory,
-  type DirectoryDialog,
-} from './catalog/directory-picker';
+import { selectOpenSpecProjectDirectory, type DirectoryDialog } from './catalog/directory-picker';
 import { HistoryStore } from './history/history-store';
 import { toProjectSnapshot } from './projection';
 import type { WatcherProjection } from './watcher/project-watcher';
 import type { WatcherManager } from './watcher/watcher-manager';
 import {
+  canonicalizeCodexProjectPath,
   codexProjectPathKey,
   discoverCodexProjects,
   type DiscoverCodexProjectsOptions,
@@ -244,7 +242,8 @@ export class AppController {
     const items: CodexImportResult['items'] = [];
 
     for (const requestedProject of request.projects) {
-      const candidate = candidates.get(codexProjectPathKey(requestedProject.rootPath));
+      const requestedRootPath = await canonicalizeCodexProjectPath(requestedProject.rootPath);
+      const candidate = candidates.get(codexProjectPathKey(requestedRootPath));
       const displayName = candidate?.displayName ?? requestedProject.displayName;
       if (!candidate) {
         items.push({
@@ -257,13 +256,17 @@ export class AppController {
       }
       const candidateWorkspace = candidate.workspace;
       const requestedWorkspace = requestedProject.workspace;
+      const requestedWorkspaceRootPath = requestedWorkspace
+        ? await canonicalizeCodexProjectPath(requestedWorkspace.rootPath)
+        : undefined;
       const workspaceMatches =
         (!candidateWorkspace && !requestedWorkspace) ||
         (candidateWorkspace !== undefined &&
           requestedWorkspace !== undefined &&
+          requestedWorkspaceRootPath !== undefined &&
           candidateWorkspace.id === requestedWorkspace.id &&
           codexProjectPathKey(candidateWorkspace.rootPath) ===
-            codexProjectPathKey(requestedWorkspace.rootPath));
+            codexProjectPathKey(requestedWorkspaceRootPath));
       if (!workspaceMatches) {
         items.push({
           rootPath: candidate.rootPath,

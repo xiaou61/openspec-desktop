@@ -317,7 +317,7 @@ function memberPathKey(path: string): string {
   return codexProjectPathKey(path);
 }
 
-async function canonicalPath(inputPath: string): Promise<string> {
+export async function canonicalizeCodexProjectPath(inputPath: string): Promise<string> {
   const normalized = normalizeCodexProjectPath(inputPath);
   try {
     return normalizeCodexProjectPath(await fs.realpath(normalized));
@@ -362,8 +362,11 @@ function isRepositoryMarker(entries: DirectoryEntry[]): boolean {
   });
 }
 
-function registeredKeySet(options: WorkspaceDiscoveryOptions): Set<string> {
-  return new Set((options.registeredRoots ?? []).map((rootPath) => memberPathKey(rootPath)));
+async function registeredKeySet(registeredRoots: string[]): Promise<Set<string>> {
+  const canonicalRoots = await Promise.all(
+    registeredRoots.map((rootPath) => canonicalizeCodexProjectPath(rootPath)),
+  );
+  return new Set(canonicalRoots.map((rootPath) => memberPathKey(rootPath)));
 }
 
 async function readDirectoryEntries(path: string): Promise<DirectoryEntry[]> {
@@ -371,13 +374,13 @@ async function readDirectoryEntries(path: string): Promise<DirectoryEntry[]> {
   return [...entries].sort((left, right) => left.name.localeCompare(right.name, 'en'));
 }
 
-export async function discoverWorkspaceMembers(
+async function discoverWorkspaceMembersWithRegisteredKeys(
   rootPathInput: string,
-  options: WorkspaceDiscoveryOptions = {},
+  options: WorkspaceDiscoveryOptions,
+  registeredKeys: ReadonlySet<string>,
 ): Promise<WorkspaceDiscoveryResult> {
   const limits = effectiveLimits(options);
-  const registeredKeys = registeredKeySet(options);
-  const rootPath = await canonicalPath(rootPathInput);
+  const rootPath = await canonicalizeCodexProjectPath(rootPathInput);
   const deadline = Date.now() + limits.timeBudgetMs;
   const members: CodexWorkspaceMember[] = [];
   const diagnostics: CodexDiscoveryDiagnostic[] = [];
@@ -443,7 +446,7 @@ export async function discoverWorkspaceMembers(
             try {
               const rawStat = await fs.lstat(rawChildPath);
               if (rawStat.isSymbolicLink() || !rawStat.isDirectory()) return null;
-              childPath = await canonicalPath(rawChildPath);
+              childPath = await canonicalizeCodexProjectPath(rawChildPath);
             } catch (error) {
               diagnostics.push(
                 codexDiscoveryDiagnosticSchema.parse({
@@ -532,6 +535,14 @@ export async function discoverWorkspaceMembers(
   };
 }
 
+export async function discoverWorkspaceMembers(
+  rootPathInput: string,
+  options: WorkspaceDiscoveryOptions = {},
+): Promise<WorkspaceDiscoveryResult> {
+  const registeredKeys = await registeredKeySet(options.registeredRoots ?? []);
+  return discoverWorkspaceMembersWithRegisteredKeys(rootPathInput, options, registeredKeys);
+}
+
 function directProject(
   indexedRoot: IndexedRoot,
   rootPath: string,
@@ -578,6 +589,7 @@ function workspaceProject(
 async function classifyIndexedRoot(
   indexedRoot: IndexedRoot,
   options: WorkspaceDiscoveryOptions,
+  registeredKeys: ReadonlySet<string>,
 ): Promise<CodexDiscoveryEntry> {
   let rootPath: string;
   try {
@@ -585,7 +597,7 @@ async function classifyIndexedRoot(
     const rawStat = await fs.lstat(normalizedInput);
     if (rawStat.isSymbolicLink() || !rawStat.isDirectory())
       return directProject(indexedRoot, normalizedInput, 'unavailable', '项目目录不存在或不可读');
-    rootPath = await canonicalPath(normalizedInput);
+    rootPath = await canonicalizeCodexProjectPath(normalizedInput);
   } catch {
     return directProject(
       indexedRoot,
@@ -602,7 +614,6 @@ async function classifyIndexedRoot(
     return directProject(indexedRoot, rootPath, 'unavailable', '项目目录不存在或不可读');
   }
 
-  const registeredKeys = registeredKeySet(options);
   const validation = await validateOpenSpecProject(rootPath);
   if (validation.valid) {
     return directProject(
@@ -615,7 +626,11 @@ async function classifyIndexedRoot(
   if (validation.reason === '项目目录不存在或不可读')
     return directProject(indexedRoot, rootPath, 'unavailable', validation.reason);
 
-  const result = await discoverWorkspaceMembers(rootPath, options);
+  const result = await discoverWorkspaceMembersWithRegisteredKeys(
+    rootPath,
+    options,
+    registeredKeys,
+  );
   if (result.members.length === 0 && result.diagnostics.length === 0 && !result.truncated)
     return directProject(indexedRoot, rootPath, 'unrecognized', '未发现 OpenSpec 项目或代码仓库');
   return workspaceProject(indexedRoot, rootPath, result);
@@ -784,9 +799,14 @@ export async function discoverCodexProjects(
   }
 
   const registeredRoots = options.registeredRoots ?? [];
+  const registeredKeys = await registeredKeySet(registeredRoots);
   const collected: Array<{ entry: CodexDiscoveryEntry; index: number }> = [];
   for (const indexedRoot of parsedIndex.roots) {
-    const entry = await classifyIndexedRoot(indexedRoot, { ...options, registeredRoots });
+    const entry = await classifyIndexedRoot(
+      indexedRoot,
+      { ...options, registeredRoots },
+      registeredKeys,
+    );
     collected.push({ entry, index: indexedRoot.index });
   }
   const entries = mergeDiscoveredEntries(collected);

@@ -188,6 +188,7 @@ describe('Codex project discovery', () => {
       await makeRepository(workspace, 'demo-api');
       await makeRepository(workspace, 'demo-docs', 'package.json');
       await fs.mkdir(join(workspace, 'notes'));
+      const canonicalFrontend = await fs.realpath(frontend);
       const codexHome = join(root, '.codex');
       await writeCodexState(codexHome, [workspace]);
 
@@ -208,7 +209,7 @@ describe('Codex project discovery', () => {
         'repository',
         'openspec-project',
       ]);
-      expect(entry.members.find((member) => member.rootPath === frontend)?.status).toBe(
+      expect(entry.members.find((member) => member.rootPath === canonicalFrontend)?.status).toBe(
         'available',
       );
       expect(result.summary).toMatchObject({
@@ -228,12 +229,16 @@ describe('Codex project discovery', () => {
     try {
       const direct = await makeOpenSpecProject(root, 'direct');
       await makeOpenSpecProject(direct, 'nested');
+      const canonicalDirect = await fs.realpath(direct);
       const codexHome = join(root, '.codex');
       await writeCodexState(codexHome, [direct]);
 
       const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
       expect(result.entries).toHaveLength(1);
-      expect(result.entries[0]).toMatchObject({ kind: 'direct-project', rootPath: direct });
+      expect(result.entries[0]).toMatchObject({
+        kind: 'direct-project',
+        rootPath: canonicalDirect,
+      });
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -247,14 +252,18 @@ describe('Codex project discovery', () => {
       const nested = await makeOpenSpecProject(join(workspace, 'containers'), 'nested-project');
       const excluded = await makeOpenSpecProject(join(workspace, 'node_modules'), 'hidden');
       await makeOpenSpecProject(workspace, 'node_modules');
+      const [canonicalNested, canonicalExcluded] = await Promise.all([
+        fs.realpath(nested),
+        fs.realpath(excluded),
+      ]);
       const codexHome = join(root, '.codex');
       await writeCodexState(codexHome, [workspace]);
 
       const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
       const entry = result.entries[0];
       if (!entry || entry.kind !== 'workspace') throw new Error('expected workspace');
-      expect(entry.members.map((member) => member.rootPath)).toContain(nested);
-      expect(entry.members.map((member) => member.rootPath)).not.toContain(excluded);
+      expect(entry.members.map((member) => member.rootPath)).toContain(canonicalNested);
+      expect(entry.members.map((member) => member.rootPath)).not.toContain(canonicalExcluded);
       expect(entry.members).toHaveLength(1);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -301,6 +310,10 @@ describe('Codex project discovery', () => {
       const inner = join(outer, 'inner');
       await fs.mkdir(inner, { recursive: true });
       const project = await makeOpenSpecProject(inner, 'project');
+      const [canonicalInner, canonicalProject] = await Promise.all([
+        fs.realpath(inner),
+        fs.realpath(project),
+      ]);
       const codexHome = join(root, '.codex');
       await writeCodexState(codexHome, [project, outer, inner]);
 
@@ -311,8 +324,8 @@ describe('Codex project discovery', () => {
       expect(workspaces).toHaveLength(1);
       const workspace = workspaces[0];
       if (!workspace || workspace.kind !== 'workspace') throw new Error('expected workspace');
-      expect(workspace).toMatchObject({ rootPath: inner });
-      expect(workspace.members.map((member) => member.rootPath)).toEqual([project]);
+      expect(workspace).toMatchObject({ rootPath: canonicalInner });
+      expect(workspace.members.map((member) => member.rootPath)).toEqual([canonicalProject]);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -344,13 +357,22 @@ describe('Codex project discovery', () => {
       await fs.mkdir(secondWorkspace, { recursive: true });
       const firstProject = await makeOpenSpecProject(firstWorkspace, 'project');
       await makeOpenSpecProject(secondWorkspace, 'project');
+      const firstProjectAlias = join(root, 'FIRST~1', 'project');
+      const originalRealpath = fs.realpath.bind(fs);
+      const canonicalFirstProject = await originalRealpath(firstProject);
+      vi.spyOn(fs, 'realpath').mockImplementation(async (path) => {
+        if (codexProjectPathKey(String(path)) === codexProjectPathKey(firstProjectAlias)) {
+          return canonicalFirstProject;
+        }
+        return originalRealpath(path);
+      });
       const codexHome = join(root, '.codex');
       await writeCodexState(codexHome, [firstWorkspace, secondWorkspace]);
 
       const result = await discoverCodexProjects({
         userHome: root,
         codexHome,
-        registeredRoots: [firstProject],
+        registeredRoots: [firstProjectAlias],
         readRetries: 0,
       });
       const workspaces = result.entries.filter((entry) => entry.kind === 'workspace');
@@ -363,6 +385,7 @@ describe('Codex project discovery', () => {
       expect(workspaces[0]?.members[0]).toMatchObject({ status: 'already-added' });
       expect(result.summary.availableCount).toBe(1);
     } finally {
+      vi.restoreAllMocks();
       await fs.rm(root, { recursive: true, force: true });
     }
   });
@@ -376,6 +399,11 @@ describe('Codex project discovery', () => {
       const healthy = await makeOpenSpecProject(workspace, 'healthy');
       const vanishing = await makeRepository(workspace, 'vanishing');
       const outside = await makeOpenSpecProject(root, 'outside');
+      const [canonicalHealthy, canonicalVanishing, canonicalOutside] = await Promise.all([
+        fs.realpath(healthy),
+        fs.realpath(vanishing),
+        fs.realpath(outside),
+      ]);
       const linked = join(workspace, 'linked');
       try {
         await fs.symlink(outside, linked, process.platform === 'win32' ? 'junction' : 'dir');
@@ -384,9 +412,12 @@ describe('Codex project discovery', () => {
       }
       let removed = false;
       vi.spyOn(fs, 'lstat').mockImplementation(async (path) => {
-        if (!removed && String(path) === vanishing) {
+        if (
+          !removed &&
+          codexProjectPathKey(String(path)) === codexProjectPathKey(canonicalVanishing)
+        ) {
           removed = true;
-          await fs.rm(vanishing, { recursive: true, force: true });
+          await fs.rm(canonicalVanishing, { recursive: true, force: true });
         }
         return originalLstat(path);
       });
@@ -396,10 +427,12 @@ describe('Codex project discovery', () => {
       const result = await discoverCodexProjects({ userHome: root, codexHome, readRetries: 0 });
       const entry = result.entries[0];
       if (!entry || entry.kind !== 'workspace') throw new Error('expected workspace');
-      expect(entry.members.map((member) => member.rootPath)).toEqual([healthy]);
-      expect(entry.members.map((member) => member.rootPath)).not.toContain(outside);
+      expect(entry.members.map((member) => member.rootPath)).toEqual([canonicalHealthy]);
+      expect(entry.members.map((member) => member.rootPath)).not.toContain(canonicalOutside);
       expect(entry.diagnostics).toEqual(
-        expect.arrayContaining([expect.objectContaining({ code: 'disappeared', path: vanishing })]),
+        expect.arrayContaining([
+          expect.objectContaining({ code: 'disappeared', path: canonicalVanishing }),
+        ]),
       );
     } finally {
       vi.restoreAllMocks();
