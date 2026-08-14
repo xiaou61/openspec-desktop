@@ -6,11 +6,11 @@ OpenSpec Desktop 是一个 Windows 优先的本地 Electron 应用。它只读�
 
 ## 快速开始
 
-当前稳定版为 [`v0.3.0`](https://github.com/xiaou61/openspec-desktop/releases/tag/v0.3.0)，支持 Windows 10/11 x64：
+当前稳定版为 [`v0.3.1`](https://github.com/xiaou61/openspec-desktop/releases/tag/v0.3.1)，支持 Windows 10/11 x64：
 
-- `OpenSpec-Desktop-0.3.0-Setup.exe`：安装版，可选择安装目录并创建桌面快捷方式。
-- `OpenSpec-Desktop-0.3.0-Portable.exe`：便携版，无需安装，直接运行。
-- `SHA256SUMS-v0.3.0.txt`：两个可执行文件的 SHA-256 校验值。
+- `OpenSpec-Desktop-0.3.1-Setup.exe`：安装版，可选择安装目录并创建桌面快捷方式。
+- `OpenSpec-Desktop-0.3.1-Portable.exe`：便携版，无需安装，直接运行。
+- `SHA256SUMS-v0.3.1.txt`：两个可执行文件的 SHA-256 校验值。
 
 安装包暂未使用代码签名证书，Windows SmartScreen 可能显示“未知发布者”。请只从[本仓库 Releases](https://github.com/xiaou61/openspec-desktop/releases/latest)下载，并在运行前核对 SHA-256。浏览项目不要求 OpenSpec CLI；在应用中运行严格验证时，需要本机安装兼容的 OpenSpec CLI。
 

@@ -1,6 +1,6 @@
 # OpenSpec Desktop 中文操作手册
 
-> 适用版本：OpenSpec Desktop `v0.3.0`（2026-08-14），对应 GitHub Release 安装版、便携版及 `main` 源码。
+> 适用版本：OpenSpec Desktop `v0.3.1`（2026-08-14），对应 GitHub Release 安装版、便携版及 `main` 源码。
 
 OpenSpec Desktop 是一个 Windows 优先的本地 Electron 应用，用于只读查看和监控本机 OpenSpec 项目。应用把项目、Change、任务、生命周期、严格验证结果和本地历史集中到桌面工作区；项目内的 OpenSpec 文件始终是事实来源。
 
@@ -8,7 +8,7 @@ OpenSpec Desktop 是一个 Windows 优先的本地 Electron 应用，用于只�
 
 ### 1.1 当前交付范围
 
-当前版本通过 [`v0.3.0` GitHub Release](https://github.com/xiaou61/openspec-desktop/releases/tag/v0.3.0) 提供 Windows x64 安装版、便携版和 SHA-256 校验文件，发布标签与 `main` 中的 `0.3.0` 源码一致。应用不包含内置帮助页；完整说明以仓库中的本手册为准。
+当前版本通过 [`v0.3.1` GitHub Release](https://github.com/xiaou61/openspec-desktop/releases/tag/v0.3.1) 提供 Windows x64 安装版、便携版和 SHA-256 校验文件，发布标签与 `main` 中的 `0.3.1` 源码一致。应用不包含内置帮助页；完整说明以仓库中的本手册为准。
 
 应用对已接入项目保持只读：不会创建或修改 `openspec/` 文件，不会勾选任务、同步主规格、归档 Change，也不会执行 Git 提交或推送。应用自身只在 Electron 的 user-data 目录保存项目登记、界面偏好、历史快照、验证缓存和实施轮次记录。
 
@@ -36,18 +36,18 @@ openspec --version
 
 ### 1.3 下载、校验与启动 Release
 
-从 [`v0.3.0` Release](https://github.com/xiaou61/openspec-desktop/releases/tag/v0.3.0) 下载所需可执行文件和 `SHA256SUMS-v0.3.0.txt`。运行前在下载目录核对校验值：
+从 [`v0.3.1` Release](https://github.com/xiaou61/openspec-desktop/releases/tag/v0.3.1) 下载所需可执行文件和 `SHA256SUMS-v0.3.1.txt`。运行前在下载目录核对校验值：
 
 ```powershell
-Get-FileHash .\OpenSpec-Desktop-0.3.0-Setup.exe -Algorithm SHA256
-Get-FileHash .\OpenSpec-Desktop-0.3.0-Portable.exe -Algorithm SHA256
-Get-Content .\SHA256SUMS-v0.3.0.txt
+Get-FileHash .\OpenSpec-Desktop-0.3.1-Setup.exe -Algorithm SHA256
+Get-FileHash .\OpenSpec-Desktop-0.3.1-Portable.exe -Algorithm SHA256
+Get-Content .\SHA256SUMS-v0.3.1.txt
 ```
 
 只需校验实际下载的可执行文件；`Get-FileHash` 输出应与校验文件中同名文件的值一致。
 
-- 安装版：运行 `OpenSpec-Desktop-0.3.0-Setup.exe`，按向导选择安装目录和快捷方式，完成后启动 **OpenSpec Desktop**。
-- 便携版：把 `OpenSpec-Desktop-0.3.0-Portable.exe` 放在可长期保留的位置并直接运行；不要在运行时移动或删除文件。
+- 安装版：运行 `OpenSpec-Desktop-0.3.1-Setup.exe`，按向导选择安装目录和快捷方式，完成后启动 **OpenSpec Desktop**。
+- 便携版：把 `OpenSpec-Desktop-0.3.1-Portable.exe` 放在可长期保留的位置并直接运行；不要在运行时移动或删除文件。
 
 当前产物未使用代码签名证书，Windows SmartScreen 可能显示“未知发布者”。确认文件来自本仓库 Release 且 SHA-256 匹配后，再按 Windows 提示选择是否运行。成功时会打开标题为 **OpenSpec Desktop** 的桌面窗口；关闭窗口即可退出应用。
 
@@ -458,7 +458,7 @@ Change 标题下的 **关联版本** 来源于实际活动和修订记录。选�
 ### 7.3 卸载
 
 - 安装版：退出应用，在 Windows **设置** → **应用** → **已安装的应用** 中卸载 **OpenSpec Desktop**。
-- 便携版：退出应用后删除 `OpenSpec-Desktop-0.3.0-Portable.exe`。
+- 便携版：退出应用后删除 `OpenSpec-Desktop-0.3.1-Portable.exe`。
 - 源码版：退出应用后删除本地源码检出及其 `node_modules/`、`out/` 等可再生内容。
 
 三种方式都不会删除已经接入的项目根，也不应把项目根与应用目录混淆。
